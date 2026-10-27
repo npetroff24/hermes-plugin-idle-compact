@@ -191,6 +191,49 @@ _timers: dict[str, threading.Timer] = {}
 _timers_lock = threading.Lock()
 
 
+def _resident(session_id: str):
+    """(agent, compressor, route) живой сессии или None. Только чтение."""
+    try:
+        from gateway.run import _gateway_runner_ref, _cached_agent_for_hygiene
+    except Exception:
+        return None
+    try:
+        runner = _gateway_runner_ref()
+    except Exception:
+        return None
+    if runner is None:
+        return None
+    row = _session_row(session_id)
+    route = (row.get("session_key") or "") if row else ""
+    if not route:
+        return None
+    try:
+        agent = _cached_agent_for_hygiene(runner, route)
+    except Exception:
+        return None
+    if agent is None:
+        return None
+    comp = getattr(agent, "context_compressor", None)
+    if comp is None:
+        return None
+    return agent, comp, route
+
+
+def _estimate_history(comp, session_id: str) -> int | None:
+    """Точная оценка ядра по истории из БД. None — не вышло."""
+    try:
+        db = getattr(comp, "_session_db", None)
+        get_conv = getattr(db, "get_messages_as_conversation", None)
+        if not callable(get_conv):
+            return None
+        history = get_conv(session_id)
+        messages = [m for m in history if m.get("role") in {"user", "assistant", "tool"}]
+        from agent.model_metadata import estimate_messages_tokens_rough
+        return int(estimate_messages_tokens_rough(messages))
+    except Exception:
+        return None
+
+
 def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
     with _timers_lock:
         _timers.pop(session_id, None)
@@ -204,23 +247,35 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
         if last_ts > stamp:
             logger.info("idle-compact: session %s active again, skip", session_id)
             return
-        size = _rough_tokens(session_id)
+        # Гейт: сначала живой порог компрессора (покрывает и ratio-only режим
+        # без threshold_tokens), иначе грубая оценка по config.yaml.
+        floor = None
+        exact = None
+        res = _resident(session_id)
+        if res is not None:
+            _, comp, _ = res
+            floor = _gate_floor(comp)
+            if floor is not None:
+                exact = _estimate_history(comp, session_id)
+        if floor is None:
+            gate = _live_gate()
+            if gate is None:
+                logger.info("idle-compact: session %s no live gate, skip", session_id)
+                return
+            floor = gate
+        size = exact if exact is not None else _rough_tokens(session_id)
         idle_min = (time.time() - last_ts) / 60 if last_ts else -1
-        gate = _live_gate()
-        if gate is None:
-            logger.info("idle-compact: session %s no live gate, skip", session_id)
-            return
-        if size <= gate:
+        if size <= floor:
             logger.info(
-                "idle-compact: session %s size ~%d <= gate %d, skip",
-                session_id, size, gate,
+                "idle-compact: session %s size ~%d <= floor %d, skip",
+                session_id, size, floor,
             )
             return
         if DRY_RUN or not WRITE_ENABLED or (ALLOWLIST and session_id not in ALLOWLIST):
             logger.info(
                 "idle-compact dry-run: session %s model %s idle %.1fmin "
-                "size ~%d > gate %d -> would compress (no writes)",
-                session_id, model, idle_min, size, gate,
+                "size ~%d > floor %d -> would compress (no writes)",
+                session_id, model, idle_min, size, floor,
             )
             return
         # -- боевое сжатие: allowlist как опциональный ограничитель --
