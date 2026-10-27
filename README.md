@@ -10,15 +10,22 @@
 > the core's live threshold. TTL measurements for other models welcome
 > (open an issue with model + pause timings from logs).
 
-Automatically compacts the context of long dialogs **before** the prompt
-cache expires. Without it, compaction fires right after your message —
-you wait ~1.5 min and pay for a cold read; with it, compaction runs while
-you're away, over the warm cache (~50x cheaper), and there's nothing to
-wait for. How: after every reply a timer of 0.9× the model's cache TTL is
-armed; long silence plus context above 1.5× the compaction threshold —
-the Hermes core compacts via its standard path.
+Compacts the context of long dialogs **during idle**, to prevent an
+uncached input on big contexts. Normally compaction fires when you come
+back after a break — the cache is already expired, and the middle of the
+history is re-read at full price. The plugin runs the same compaction
+while the cache is still alive, at the cached-read price (how much
+cheaper depends on the model and its cache pricing).
 
-Measured: ~10%+ savings on active days, plus minutes of waiting eliminated.
+Time: when a compaction goes to idle time, its 70–105 seconds are no
+longer taken out of your turn — this applies only to the compactions that
+actually ran in the background.
+
+How: after every reply a timer of 0.9× the model's cache TTL is armed;
+long silence plus context above 1.5× the compaction threshold — the
+Hermes core compacts via its standard path.
+
+Measured: ~10%+ savings on active days.
 
 ## How it works
 
@@ -83,14 +90,20 @@ of the active session live in `rollback_<session>.json` (not in the repo).
 
 ## По-русски
 
-Плагин автоматически сжимает контекст длинных диалогов до истечения кеша.
-Зачем: иначе сжатие случается после твоего сообщения — ждёшь ~1,5 мин
-и платишь за холодное чтение; с плагином сжатие идёт в простое по тёплому
-кешу (в ~50 раз дешевле) и ждать не нужно. Как: после каждого ответа
-ставится таймер 0,9×TTL модели; долгая тишина и контекст больше порога×1,5 —
-сжимает ядро Hermes своим штатным путём.
+Плагин сжимает контекст при простое, чтобы предотвратить некэшированный
+вход на больших контекстах. Обычно сжатие срабатывает на возврате после
+перерыва — когда кеш уже истёк, — и середина истории перечитывается по
+полной цене. Плагин делает то же сжатие, пока кеш ещё жив, по цене
+кешированного чтения; насколько дешевле — зависит от модели.
 
-Замерено: ~10%+ экономии на активных днях + минуты несъеденного ожидания.
+Время: когда сжатие уходит в простой, его 70–105 секунд больше не
+съедаются из хода — это происходит только для тех сжатий, которые
+сработали в фоне.
+
+Как: после каждого ответа ставится таймер 0,9×TTL модели; долгая тишина
+и контекст больше порога×1,5 — сжимает ядро Hermes своим штатным путём.
+
+Замерено: ~10%+ экономии на активных днях.
 
 Логика, модели, установка и откат — как в английской части выше.
 Проверка на Windows: `findstr "idle-compact" %LOCALAPPDATA%\hermes\logs\gateway.log`.
