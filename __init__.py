@@ -454,8 +454,8 @@ def register(ctx) -> None:
     """Точка входа плагина: только подписка на хук, тяжёлого нет."""
     ctx.register_hook("on_session_end", _on_session_end)
     logger.info(
-        "idle-compact 0.2.0 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=%s",
-        DRY_RUN, WRITE_ENABLED, _live_gate(),
+        "idle-compact 0.3.0 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        DRY_RUN, WRITE_ENABLED,
     )
 
 

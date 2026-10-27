@@ -1,5 +1,5 @@
 name: idle-compact
-version: 0.2.0
+version: 0.3.0
 description: "Фоновое сжатие простаивающих сессий до истечения prompt-cache."
 author: "custom"
 kind: standalone
