@@ -1,4 +1,14 @@
-# idle-compact
+# idle-compact (beta)
+
+> Бета: TTL кеша замерен только для двух моделей ниже. Для остальных
+> действует осторожный таймер по умолчанию (10 мин) — сжатие и гейт при
+> этом всё равно идут от живого порога ядра. Замеры TTL других моделей
+> приветствуются (открывайте issue с моделью и паузами из логов).
+>
+> Beta: cache TTL is measured for two models below only. Others get
+> a conservative default timer (10 min) — gate and compaction still follow
+> the core's live threshold. TTL measurements for other models welcome
+> (open an issue with model + pause timings from logs).
 
 Automatically compacts the context of long dialogs **before** the prompt
 cache expires. Without it, compaction fires right after your message —
