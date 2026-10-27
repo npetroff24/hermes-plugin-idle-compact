@@ -20,11 +20,26 @@
    локи, cooldown, anti-thrash, watermark против гонок.
 4. Маленькие/молодые/cron-сессии не трогаются.
 
-## Установка
+## Установка (одна команда)
+
+Требуется установленный Hermes Agent.
 
 ```bash
-hermes plugins install <git-url> --enable
+hermes plugins install npetroff24/hermes-plugin-idle-compact --enable
 ```
+
+Что произойдёт: плагин скачается с гитхаба, включится и подхватится
+живым gateway без перезапуска. Ничего править руками не надо.
+
+Проверка, что работает (в течение минуты появится строка):
+
+```bash
+grep -a "idle-compact" ~/.hermes/logs/gateway.log | tail -2
+# idle-compact 0.2.0 loaded: DRY_RUN=False WRITE_ENABLED=True gate=150000
+```
+
+Дальше плагин сам ставит таймеры после каждого ответа и пишет
+в тот же лог строки `timer ...`, `COMPRESS START/DONE`.
 
 ## Откат
 
