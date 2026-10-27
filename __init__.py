@@ -46,8 +46,24 @@ THRESHOLD_TOKENS = 500_000   # сверено: compression.threshold_tokens (т�
 TARGET_RATIO = 0.2           # сверено: tokens_after ~0.2 x threshold
 HUMAN_SOURCES = {"telegram", "desktop", "cli", "tui", "messaging"}
 
-_HERMES_HOME = Path.home() / ".hermes"
-_STATE_DB = str(_HERMES_HOME / "state.db")
+_HERMES_HOME_FALLBACK = Path.home() / ".hermes"
+
+
+def _home() -> Path:
+    """Дом Hermes той же лесенкой, что ядро: override → HERMES_HOME → платформа
+    (Windows: %LOCALAPPDATA%\\hermes, иначе ~/.hermes)."""
+    try:
+        from hermes_constants import get_hermes_home
+        h = get_hermes_home()
+        if h:
+            return Path(h)
+    except Exception:
+        pass
+    return _HERMES_HOME_FALLBACK
+
+
+def _state_db() -> str:
+    return str(_home() / "state.db")
 
 GATE_TOKENS = int(THRESHOLD_TOKENS * TARGET_RATIO * GATE_K)  # = 150000
 if TEST_GATE_TOKENS is not None:
@@ -62,7 +78,7 @@ def _live_target() -> int | None:
     global _warned_no_config
     try:
         import yaml
-        with open(str(_HERMES_HOME / "config.yaml"), "r", encoding="utf-8") as fh:
+        with open(str(_home() / "config.yaml"), "r", encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh) or {}
         comp = cfg.get("compression") or {}
         thr = comp.get("threshold_tokens")
@@ -103,7 +119,7 @@ def _delay_for_model(model: str) -> float:
 
 def _rough_tokens(session_id: str) -> int:
     """Грубая оценка размера активного транскрипта (chars/4). Только чтение."""
-    con = sqlite3.connect(f"file:{_STATE_DB}?mode=ro", uri=True)
+    con = sqlite3.connect(f"file:{_state_db()}?mode=ro", uri=True)
     try:
         cur = con.execute(
             "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM messages "
@@ -117,7 +133,7 @@ def _rough_tokens(session_id: str) -> int:
 
 
 def _session_row(session_id: str) -> dict | None:
-    con = sqlite3.connect(f"file:{_STATE_DB}?mode=ro", uri=True)
+    con = sqlite3.connect(f"file:{_state_db()}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
         cur = con.execute(
@@ -134,7 +150,7 @@ def _session_row(session_id: str) -> dict | None:
 
 def scan_candidates() -> list[dict]:
     """Кандидаты прямо сейчас (для ручного dry-run): большие human-сессии."""
-    con = sqlite3.connect(f"file:{_STATE_DB}?mode=ro", uri=True)
+    con = sqlite3.connect(f"file:{_state_db()}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
         cur = con.execute(
