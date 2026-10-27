@@ -16,7 +16,9 @@ state.db в read-only и строки в лог вида «сжал бы N→M»
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
+import sys
 import threading
 import time
 from pathlib import Path
@@ -59,6 +61,13 @@ def _home() -> Path:
             return Path(h)
     except Exception:
         pass
+    env = os.environ.get("HERMES_HOME", "").strip()
+    if env:
+        return Path(os.path.expandvars(os.path.expanduser(env)))
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "").strip()
+        base = Path(local) if local else Path.home() / "AppData" / "Local"
+        return base / "hermes"
     return _HERMES_HOME_FALLBACK
 
 
