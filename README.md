@@ -22,7 +22,7 @@ longer taken out of your turn — this applies only to the compactions that
 actually ran in the background.
 
 How: after every reply a timer of 0.9× the model's cache TTL is armed;
-long silence plus context above 1.5× the compaction threshold — the
+long silence plus context above 1.5× the compaction target — the
 Hermes core compacts via its standard path.
 
 Measured: ~10%+ savings on active days.
@@ -31,8 +31,8 @@ Measured: ~10%+ savings on active days.
 
 1. After every reply a timer is armed: Spark — 9 min, DeepSeek — ~76 min.
    A new message resets and re-arms it.
-2. Fired: silence, human source, context above 1.5× threshold —
-   compact now, while reads go through the warm cache.
+2. Fired: silence, human source, context above 1.5× the compaction
+   target — compact now, while reads go through the warm cache.
 3. Compaction is done by the Hermes core via its standard path: locks,
    cooldown, anti-thrash, no lost messages on races.
 4. Short/fresh/service dialogs are left alone.
@@ -101,7 +101,8 @@ of the active session live in `rollback_<session>.json` (not in the repo).
 сработали в фоне.
 
 Как: после каждого ответа ставится таймер 0,9×TTL модели; долгая тишина
-и контекст больше порога×1,5 — сжимает ядро Hermes своим штатным путём.
+и контекст больше цели сжатия в 1,5 раза — сжимает ядро Hermes своим
+штатным путём.
 
 Замерено: ~10%+ экономии на активных днях.
 
