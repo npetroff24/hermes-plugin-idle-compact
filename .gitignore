@@ -1,0 +1,3 @@
+__pycache__/
+snapshot_*.json
+rollback_*.json
