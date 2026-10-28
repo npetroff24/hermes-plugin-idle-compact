@@ -190,6 +190,51 @@ def scan_candidates() -> list[dict]:
 _timers: dict[str, threading.Timer] = {}
 _timers_lock = threading.Lock()
 
+# Ожидающие таймеры переживают reload плагина: {session_id: {deadline, stamp, model}}
+_PENDING_FILE = "idle_compact_pending.json"
+
+
+def _pending_path() -> Path:
+    return _home() / _PENDING_FILE
+
+
+def _load_pending() -> dict[str, dict]:
+    try:
+        import json
+        data = json.loads(_pending_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        logger.exception("idle-compact: pending state read failed")
+        return {}
+
+
+def _save_pending(state: dict[str, dict]) -> None:
+    try:
+        import json
+        path = _pending_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        logger.exception("idle-compact: pending state write failed")
+
+
+def _remember(session_id: str, deadline: float, stamp: float, model: str) -> None:
+    with _timers_lock:
+        state = _load_pending()
+        state[session_id] = {"deadline": deadline, "stamp": stamp, "model": model}
+        _save_pending(state)
+
+
+def _forget(session_id: str) -> None:
+    with _timers_lock:
+        state = _load_pending()
+        if state.pop(session_id, None) is not None:
+            _save_pending(state)
+
 
 def _resident(session_id: str):
     """(agent, compressor, route) живой сессии или None. Только чтение."""
@@ -237,6 +282,7 @@ def _estimate_history(comp, session_id: str) -> int | None:
 def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
     with _timers_lock:
         _timers.pop(session_id, None)
+    _forget(session_id)
     try:
         row = _session_row(session_id)
         if not row:
@@ -313,6 +359,7 @@ def _on_session_end(session_id: str = "", **kwargs) -> None:
         t.daemon = True
         _timers[session_id] = t
         t.start()
+    _remember(session_id, stamp + delay, stamp, model)
     gate = _live_gate()
     logger.info(
         "idle-compact: timer %.0fs for session %s model %s (gate %s)",
@@ -410,6 +457,11 @@ def _do_compress(session_id: str, model: str, size: int, ctx) -> None:
     logger.info(
         "idle-compact COMPRESS START: session %s model %s exact ~%d",
         session_id, model, exact)
+    try:
+        from . import savings
+        savings.begin_compaction(session_id, model, exact)
+    except Exception:
+        logger.exception("idle-compact: savings begin failed")
 
     def work() -> None:
         try:
@@ -436,8 +488,29 @@ def _do_compress(session_id: str, model: str, size: int, ctx) -> None:
             else:
                 run()
             logger.info("idle-compact COMPRESS DONE: session %s", session_id)
+            # Размер после сжатия — тем же оценщиком, что и до
+            after = None
+            try:
+                from agent.model_metadata import estimate_messages_tokens_rough
+                new_history = get_conv(session_id)
+                _nh = new_history if isinstance(new_history, (list, tuple)) else []
+                new_msgs = [m for m in _nh if isinstance(m, dict) and m.get("role") in {"user", "assistant", "tool"}]
+                after = int(estimate_messages_tokens_rough(new_msgs))
+            except Exception:
+                after = None
+            try:
+                from . import savings
+                savings.end_compaction(session_id, after)
+                savings.log_summary(session_id)
+            except Exception:
+                logger.exception("idle-compact: savings end failed")
         except Exception:
             logger.exception("idle-compact COMPRESS FAILED: %s", session_id)
+            try:
+                from . import savings
+                savings.abort_compaction(session_id)
+            except Exception:
+                pass
         finally:
             evict = getattr(runner, "_evict_cached_agent", None)
             if callable(evict):
@@ -450,13 +523,71 @@ def _do_compress(session_id: str, model: str, size: int, ctx) -> None:
     th.start()
 
 
+def _restore_pending() -> None:
+    """Восстанавливаем таймеры, пережившие reload: дожидаемся остатка срока."""
+    state = _load_pending()
+    if not state:
+        return
+    now = time.time()
+    restored = dropped = 0
+    for session_id, entry in list(state.items()):
+        try:
+            deadline = float(entry.get("deadline") or 0)
+            stamp = float(entry.get("stamp") or 0)
+            model = str(entry.get("model") or "")
+        except Exception:
+            dropped += 1
+            continue
+        if deadline <= 0 or stamp <= 0:
+            dropped += 1
+            continue
+        row = _session_row(session_id)
+        # Сессия исчезла/закрыта/не human — забываем
+        if not row or row.get("source") not in HUMAN_SOURCES or row.get("ended_at"):
+            dropped += 1
+            continue
+        # Уже был активный ход после нашего таймера — ждать нечего
+        if (row.get("last_activity_at") or 0) > stamp:
+            dropped += 1
+            continue
+        delay = max(0.0, deadline - now)
+        with _timers_lock:
+            old = _timers.pop(session_id, None)
+            if old is not None:
+                old.cancel()
+            t = threading.Timer(delay, _fire, args=(session_id, stamp, model, None))
+            t.daemon = True
+            _timers[session_id] = t
+            t.start()
+        restored += 1
+        logger.info(
+            "idle-compact: restored timer %.0fs for session %s model %s",
+            delay, session_id, model,
+        )
+    fresh = {sid: e for sid, e in state.items()
+             if sid in _timers}
+    if dropped or len(fresh) != len(state):
+        _save_pending(fresh)
+    logger.info(
+        "idle-compact: pending restore done — restored %s, dropped %s", restored, dropped)
+
+
 def register(ctx) -> None:
     """Точка входа плагина: только подписка на хук, тяжёлого нет."""
     ctx.register_hook("on_session_end", _on_session_end)
+    try:
+        from . import savings
+        ctx.register_hook("post_api_request", savings.on_post_api_request)
+    except Exception:
+        logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.3.0 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.4.1 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
+    try:
+        _restore_pending()
+    except Exception:
+        logger.exception("idle-compact: pending restore failed")
 
 
 def unregister(ctx) -> None:
