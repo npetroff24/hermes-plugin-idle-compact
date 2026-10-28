@@ -132,44 +132,48 @@ class TestCompressionCounters(unittest.TestCase):
 
 class TestComputeSaving(unittest.TestCase):
     def test_cold_case_is_positive(self):
-        """Кеш умер бы: сжатие с тёплым чтением дешевле холодного."""
+        """Кеш умер бы: те же токены читались бы по полной цене."""
         facts = {"input": 0, "cache_read": 125_000, "output": 1_000, "calls": 1}
         saved, verdict, cost = savings.compute_saving(
-            n_before=225_000, n_after=100_000, facts=facts,
-            gap_s=3600, ttl_s=600, model="muse-spark",
+            facts=facts, gap_s=3600, ttl_s=600, model="muse-spark",
         )
-        # baseline 225K × 0.10/1M = 0.0225; cost = 125K×0.002/1M + 1K×0.20/1M
-        self.assertAlmostEqual(cost, 0.00025 + 0.0002, places=9)
-        self.assertAlmostEqual(saved, 0.0225 - 0.00045, places=9)
+        out_cost = 1_000 / 1e6 * 0.20
+        # baseline = 125K × 0.10/1M + out; cost = 125K × 0.002/1M + out
+        self.assertAlmostEqual(cost, 125_000 / 1e6 * 0.002 + out_cost, places=9)
+        self.assertAlmostEqual(saved, 125_000 / 1e6 * (0.10 - 0.002), places=9)
         self.assertIn("холодный", verdict)
         self.assertGreater(saved, 0)
 
-    def test_warm_case_can_be_negative(self):
-        """Вернулся раньше TTL — плагин потратил лишнее."""
+    def test_warm_case_is_zero_not_negative(self):
+        """Вернулся раньше TTL: кеш был тёплым, значит выигрыша нет."""
         facts = {"input": 0, "cache_read": 125_000, "output": 1_000, "calls": 1}
         saved, verdict, cost = savings.compute_saving(
-            n_before=225_000, n_after=100_000, facts=facts,
-            gap_s=120, ttl_s=600, model="muse-spark",
+            facts=facts, gap_s=120, ttl_s=600, model="muse-spark",
         )
-        # baseline 225K × 0.002/1M = 0.00045 < cost 0.00045 → около нуля/минус
         self.assertIn("тёплым", verdict)
-        self.assertLessEqual(saved, 0.00045)
+        self.assertAlmostEqual(saved, 0.0, places=9)
+
+    def test_warm_case_with_fresh_read_is_negative(self):
+        """Факт показывает свежее чтение при тёплом сценарии — это убыток."""
+        facts = {"input": 125_000, "cache_read": 0, "output": 1_000, "calls": 1}
+        saved, verdict, _ = savings.compute_saving(
+            facts=facts, gap_s=60, ttl_s=600, model="muse-spark",
+        )
+        self.assertIn("тёплым", verdict)
+        self.assertLess(saved, 0)
 
     def test_cold_case_without_cache_read_is_worse(self):
-        """Если факт показывает чтение без кеша — экономии почти нет."""
+        """Если факт показывает чтение без кеша — экономии нет вообще."""
         cold_facts = {"input": 125_000, "cache_read": 0, "output": 1_000, "calls": 1}
         saved, _, cost = savings.compute_saving(
-            n_before=225_000, n_after=100_000, facts=cold_facts,
-            gap_s=3600, ttl_s=600, model="muse-spark",
+            facts=cold_facts, gap_s=3600, ttl_s=600, model="muse-spark",
         )
-        self.assertAlmostEqual(cost, 0.0125 + 0.0002, places=9)
-        self.assertAlmostEqual(saved, 0.0225 - 0.0127, places=9)
+        self.assertAlmostEqual(saved, 0.0, places=9)
 
     def test_ttl_boundary_is_cold(self):
         facts = {"input": 0, "cache_read": 100_000, "output": 100, "calls": 1}
         _, verdict, _ = savings.compute_saving(
-            n_before=200_000, n_after=100_000, facts=facts,
-            gap_s=600, ttl_s=600, model="muse-spark",
+            facts=facts, gap_s=600, ttl_s=600, model="muse-spark",
         )
         self.assertIn("холодный", verdict)
 

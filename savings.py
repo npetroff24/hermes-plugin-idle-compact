@@ -167,26 +167,34 @@ def delta(before: dict, after: dict) -> dict:
 
 
 def compute_saving(
-    *, n_before: int, n_after: int, facts: dict, gap_s: float, ttl_s: int, model: str
+    *, facts: dict, gap_s: float, ttl_s: int, model: str
 ) -> tuple[float, str, float]:
-    """(экономия $, вердикт, стоимость сжатия $).
+    """(экономия $, вердикт, полная стоимость сжатия $).
 
-    Сравниваем с миром без плагина по фактическим токенам сжатия.
+    ``gap_s`` — сколько прошло ОТ НАШЕГО СЖАТИЯ до возврата пользователя
+    (не пауза перед сжатием: она всегда 0.9×TTL и кеш там жив).
+
+    Читается не весь контекст, а только «середина» (input + cache_read из
+    фактических счётчиков), поэтому baseline строится по этому же объёму:
+    без плагина те же токены прочитались бы по цене fresh (кеш мёртв) или
+    read (кеш жив). Генерация саммари (output) есть в обоих мирах и
+    сокращается — иначе тёплый случай показывал бы ложный минус.
     """
-    compact_cost = cost_of_facts(facts, model)
     fresh = price_for(model)["fresh"]
     read = price_for(model)["read"]
+    out_price = price_for(model)["out"]
+    read_tokens = max(0, int(facts.get("input", 0))) + max(0, int(facts.get("cache_read", 0)))
+    out_tokens = max(0, int(facts.get("output", 0)))
+    compact_cost = cost_of_facts(facts, model)
     would_be_cold = gap_s >= ttl_s
 
     if would_be_cold:
-        baseline = max(0, int(n_before)) / 1_000_000 * fresh
-        saved = baseline - compact_cost
+        baseline = read_tokens / 1_000_000 * fresh + out_tokens / 1_000_000 * out_price
         verdict = "предотвращён холодный вход"
     else:
-        baseline = max(0, int(n_before)) / 1_000_000 * read
-        saved = baseline - compact_cost
+        baseline = read_tokens / 1_000_000 * read + out_tokens / 1_000_000 * out_price
         verdict = "кеш был бы тёплым (зря сжали)"
-    return saved, verdict, compact_cost
+    return baseline - compact_cost, verdict, compact_cost
 
 
 def ttl_seconds(model: str) -> int:
@@ -297,8 +305,6 @@ def on_post_api_request(**kw) -> None:
     gap = max(0.0, float(started) - float(pend["ts"]))
     ttl = ttl_seconds(pend["model"])
     saved, verdict, compact_cost = compute_saving(
-        n_before=pend["before"],
-        n_after=pend["after"],
         facts=pend.get("facts") or {},
         gap_s=gap,
         ttl_s=ttl,
@@ -333,8 +339,8 @@ def on_post_api_request(**kw) -> None:
     }
     _append(ev)
     logger.info(
-        "idle-compact SAVINGS: %s | %s | пауза %.0f мин против TTL %.0f мин | "
-        "сжатие $%.5f | экономия $%+.5f",
+        "idle-compact SAVINGS: %s | %s | возврат через %.0f мин после сжатия "
+        "(TTL %.0f мин) | сжатие $%.5f | экономия $%+.5f",
         sid, verdict, gap / 60, ttl / 60, compact_cost, saved,
     )
 
