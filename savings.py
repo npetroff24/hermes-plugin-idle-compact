@@ -1,34 +1,35 @@
-"""Учёт экономии idle-compact: деньги и время, по каждому сжатию и по сессии.
+"""Учёт экономии idle-compact — по ФАКТИЧЕСКИМ токенам из state.db.
 
-Логика учёта (согласована с Ником 28.10.2026):
+Почему так, а не через хуки: aux-вызовы сжатия не стреляют `post_api_request`
+(компрессор идёт через `auxiliary_client.call_llm` → `post_auxiliary_call`),
+поэтому ловить их хуком нельзя. Зато Hermes сам пишет по каждому такому
+вызову строку в `session_model_usage` с `task='compression'` — с точными
+`input_tokens`, `cache_read_tokens`, `output_tokens`.
 
-Сжатие в простое ломает префикс, поэтому следующий живой запрос идёт
-холодным, но коротким. Сравниваем с миром без плагина:
+Отсюда:
+  * стоимость сжатия = дельта этих счётчиков до/после сжатия, по прайсу;
+  * `cache_read_tokens` в дельте показывает ФАКТ — читалось ли по кешу
+    (а не догадку «пауза против TTL»).
 
-  без сжатия:  холодное чтение N токенов по цене fresh
-  со сжатием:  тёплое чтение N при сжатии + выход саммари
-               + холодное чтение M на следующем живом ходе
+Сравнение с миром без плагина:
 
-Поэтому одно и то же сжатие может быть и плюсом, и минусом:
+  пауза >= TTL (кеш всё равно умер бы):
+      без плагина: aux читает N_before по цене fresh
+      с плагином: фактические (input × fresh + cache_read × read + output × out)
+      экономия = N_before × fresh − фактическая стоимость сжатия
 
-  gap >= TTL  — кэш всё равно умер бы. Плюс равен сэкономленным токенам
-                (N - M), умноженным на цену ввода, которую реально заплатил
-                этот запрос, минус стоимость самого сжатия.
-  gap <  TTL  — юзер вернулся, кэш был бы ещё тёплым. Тогда плагин только
-                потратил деньги: считаем как (что заплатили) минус
-                (что заплатили бы тёплым по N).
+  пауза <  TTL (кеш был бы ещё тёплым):
+      без плагина: aux читал бы N_before по цене read
+      экономия = N_before × read − фактическая стоимость сжатия  (обычно < 0)
 
-Время: длительность самого сжатия — это ровно то ожидание, которое иначе
-встало бы в критическом пути у порога.
-
-Леджер — JSONL, дописывается, ничего не переписывает:
-  ~/.hermes/idle_compact_ledger.jsonl
+Леджер — JSONL в `~/.hermes/idle_compact_ledger.jsonl`, дописывается.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -36,25 +37,28 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # ── Цены, $ за 1M токенов ────────────────────────────────────────────────
-# Замерено живьём на opencode-go 28.10.2026, сходится до 7-го знака:
+# Замерено живьём на opencode-go 28.10.2026 (сверено с биллингом до 4-го знака):
 #   muse cold 40530 tok + 422 out = 0.0041374 | warm 40305 cached = 0.00022311
-#   deepseek cold 40535 tok + 12 out = 0.0121749 | warm 40448 cached = 0.00028319
+# DeepSeek: off-peak 0.15/0.003/0.60, peak 0.30/0.006/1.20 — берём peak
+# (консервативно: завышает расход, значит экономию не завышает).
 PRICES: dict[str, dict[str, float]] = {
     "muse-spark": {"fresh": 0.10, "read": 0.002, "out": 0.20},
     "deepseek-v4.1": {"fresh": 0.30, "read": 0.006, "out": 1.20},
+    "deepseek-v4": {"fresh": 0.14, "read": 0.0028, "out": 0.28},
+    "mimo-v2": {"fresh": 0.14, "read": 0.0028, "out": 0.28},
 }
-_FALLBACK = {"fresh": 0.10, "read": 0.002, "out": 0.20}  # muse как самый частый
+_FALLBACK = {"fresh": 0.10, "read": 0.002, "out": 0.20}
 
 _lock = threading.Lock()
-# session_id -> {"pending": {...}, "totals": {...}, "durs": [...]}
 _state: dict[str, dict] = {}
-# session_id -> {"start": ts, "cost": 0.0, "calls": 0, "before": N}
 _compacting: dict[str, dict] = {}
+
+
+# ── Дом и пути ───────────────────────────────────────────────────────────
 
 
 def _home() -> Path:
     import os
-    import sys
 
     try:
         from hermes_constants import get_hermes_home
@@ -67,14 +71,22 @@ def _home() -> Path:
     env = os.environ.get("HERMES_HOME", "").strip()
     if env:
         return Path(os.path.expandvars(os.path.expanduser(env)))
-    return Path.home() / (".hermes")
+    return Path.home() / ".hermes"
 
 
 def ledger_path() -> Path:
     return _home() / "idle_compact_ledger.jsonl"
 
 
+def state_db_path() -> Path:
+    return _home() / "state.db"
+
+
+# ── Цены ─────────────────────────────────────────────────────────────────
+
+
 def price_for(model: str) -> dict[str, float]:
+    """Цена по подстроке модели, longest-match wins."""
     m = (model or "").strip().lower()
     best = -1
     pick = _FALLBACK
@@ -88,6 +100,103 @@ def price_for(model: str) -> dict[str, float]:
 def cost_of(tokens: int, kind: str, model: str) -> float:
     p = price_for(model)
     return max(0, int(tokens)) / 1_000_000 * p[kind]
+
+
+def cost_of_facts(facts: dict, model: str) -> float:
+    """Стоимость по фактическим токенам: input, cache_read, output."""
+    p = price_for(model)
+    return (
+        max(0, int(facts.get("input", 0))) / 1_000_000 * p["fresh"]
+        + max(0, int(facts.get("cache_read", 0))) / 1_000_000 * p["read"]
+        + max(0, int(facts.get("output", 0))) / 1_000_000 * p["out"]
+    )
+
+
+# ── Фактические счётчики сжатия из state.db ──────────────────────────────
+
+
+def compression_counters(
+    session_id: str, model: str = "", db_path: Path | None = None
+) -> dict:
+    """(input, cache_read, output, calls) по task='compression' для сессии.
+
+    Читает ту же строку, которую пишет ядро на каждый aux-вызов сжатия.
+    Модель не фильтруем: смена модели посреди сессии не должна терять вызовы.
+    """
+    facts = {"input": 0, "cache_read": 0, "output": 0, "calls": 0}
+    if not session_id:
+        return facts
+    path = db_path or state_db_path()
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+    except Exception:
+        logger.debug("idle-compact: state.db open failed", exc_info=True)
+        return facts
+    try:
+        row = con.execute(
+            "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(cache_read_tokens),0), "
+            "COALESCE(SUM(output_tokens),0), COALESCE(SUM(api_call_count),0) "
+            "FROM session_model_usage WHERE session_id = ? AND task = 'compression'",
+            (session_id,),
+        ).fetchone()
+        if row:
+            facts = {
+                "input": int(row[0] or 0),
+                "cache_read": int(row[1] or 0),
+                "output": int(row[2] or 0),
+                "calls": int(row[3] or 0),
+            }
+    except Exception:
+        logger.debug("idle-compact: compression counters read failed", exc_info=True)
+    finally:
+        con.close()
+    return facts
+
+
+def delta(before: dict, after: dict) -> dict:
+    """Разница счётчиков сжатия: что потратил именно этот проход."""
+    return {
+        "input": max(0, int(after.get("input", 0)) - int(before.get("input", 0))),
+        "cache_read": max(0, int(after.get("cache_read", 0)) - int(before.get("cache_read", 0))),
+        "output": max(0, int(after.get("output", 0)) - int(before.get("output", 0))),
+        "calls": max(0, int(after.get("calls", 0)) - int(before.get("calls", 0))),
+    }
+
+
+# ── Чистый расчёт экономии (тестируется без сети и без базы) ─────────────
+
+
+def compute_saving(
+    *, n_before: int, n_after: int, facts: dict, gap_s: float, ttl_s: int, model: str
+) -> tuple[float, str, float]:
+    """(экономия $, вердикт, стоимость сжатия $).
+
+    Сравниваем с миром без плагина по фактическим токенам сжатия.
+    """
+    compact_cost = cost_of_facts(facts, model)
+    fresh = price_for(model)["fresh"]
+    read = price_for(model)["read"]
+    would_be_cold = gap_s >= ttl_s
+
+    if would_be_cold:
+        baseline = max(0, int(n_before)) / 1_000_000 * fresh
+        saved = baseline - compact_cost
+        verdict = "предотвращён холодный вход"
+    else:
+        baseline = max(0, int(n_before)) / 1_000_000 * read
+        saved = baseline - compact_cost
+        verdict = "кеш был бы тёплым (зря сжали)"
+    return saved, verdict, compact_cost
+
+
+def ttl_seconds(model: str) -> int:
+    m = (model or "").strip().lower()
+    if "deepseek-v4" in m:
+        return 5100
+    return 600
+
+
+# ── Леджер ───────────────────────────────────────────────────────────────
 
 
 def _append(ev: dict) -> None:
@@ -117,45 +226,47 @@ def _sess(session_id: str) -> dict:
     return st
 
 
-# ── Хуки ────────────────────────────────────────────────────────────────
+# ── Хуки жизненного цикла сжатия ─────────────────────────────────────────
 
 
 def begin_compaction(session_id: str, model: str, before_tokens: int) -> None:
-    """Плагин стартует фоновое сжатие: открываем окно учёта его стоимости."""
+    """Сжатие стартует: запоминаем счётчики сжатия и размер до."""
     with _lock:
         _compacting[session_id] = {
             "start": time.time(),
-            "cost": 0.0,
-            "calls": 0,
             "before": int(before_tokens),
             "model": model,
+            "facts0": compression_counters(session_id),
         }
 
 
 def end_compaction(session_id: str, after_tokens: int | None = None) -> None:
-    """Сжатие закончилось: превращаем окно в pending-событие, ждём живой ход."""
+    """Сжатие закончилось: фиксируем фактическую стоимость прохода."""
     with _lock:
         win = _compacting.pop(session_id, None)
         if not win:
             return
         dur = time.time() - win["start"]
+        facts = delta(win.get("facts0") or {}, compression_counters(session_id))
+        compact_cost = cost_of_facts(facts, win["model"])
         st = _sess(session_id)
         st["durs"].append(dur)
-        st["spent_usd"] += win["cost"]
+        st["spent_usd"] += compact_cost
         st["pending"] = {
             "ts": win["start"],
             "model": win["model"],
             "before": win["before"],
             "after": int(after_tokens or 0),
             "dur_s": round(dur, 1),
-            "cost_usd": round(win["cost"], 6),
-            "calls": win["calls"],
+            "cost_usd": round(compact_cost, 6),
+            "facts": facts,
         }
-        logger.info(
-            "idle-compact SAVINGS: сжатие %s: %d -> %d токенов, %.1f сек, "
-            "стоило $%.5f (%d вызовов), ждём живой ход",
-            session_id, win["before"], int(after_tokens or 0), dur, win["cost"], win["calls"],
-        )
+    logger.info(
+        "idle-compact SAVINGS: сжатие %s: %d -> %d токенов, %.1f сек, "
+        "факт input=%d cache_read=%d out=%d, стоило $%.5f (вызовов %d), ждём живой ход",
+        session_id, win["before"], int(after_tokens or 0), dur,
+        facts["input"], facts["cache_read"], facts["output"], compact_cost, facts["calls"],
+    )
 
 
 def abort_compaction(session_id: str) -> None:
@@ -164,57 +275,35 @@ def abort_compaction(session_id: str) -> None:
 
 
 def on_post_api_request(**kw) -> None:
-    """Считаем стоимость каждого запроса; при компакции — приписываем сжатию."""
+    """Живой вызов после фонового сжатия — момент расчёта.
+
+    Стоимость самого запроса не нужна: сравнение идёт по фактическим
+    токенам сжатия из базы, а не по этому вызову.
+    """
     sid = kw.get("session_id") or ""
     if not sid:
         return
-    usage = kw.get("usage") or {}
-    model = kw.get("model") or (kw.get("response_model") or "")
-    inp = int(usage.get("input_tokens") or 0)
-    read = int(usage.get("cache_read_tokens") or 0)
-    write = int(usage.get("cache_write_tokens") or 0)
-    out = int(usage.get("output_tokens") or 0)
-    prompt = int(usage.get("prompt_tokens") or (inp + read + write))
-    p = price_for(model)
-    cost = (
-        inp / 1_000_000 * p["fresh"]
-        + read / 1_000_000 * p["read"]
-        + write / 1_000_000 * p["fresh"]
-        + out / 1_000_000 * p["out"]
-    )
-
     with _lock:
-        win = _compacting.get(sid)
-        if win is not None:
-            win["cost"] += cost
-            win["calls"] += 1
+        if sid in _compacting:
             return
-        st = _sess(sid)
-        pend = st.pop("pending", None) if st.get("pending") else None
-        if pend is None:
+        st = _state.get(sid)
+        if not st or not st.get("pending"):
             return
+        pend = st["pending"]
+        st["pending"] = None
 
-    if pend is None:
-        return
-
-    gap = max(0.0, kw.get("started_at") or time.time()) - pend["ts"] if kw.get("started_at") else time.time() - pend["ts"]
-    ttl = _ttl_seconds(pend["model"])
-    would_be_cold = gap >= ttl
-    n_before = pend["before"]
-    n_after = pend["after"] or prompt
-    compact_cost = pend["cost_usd"]
-
-    if would_be_cold:
-        # Кэш всё равно протух бы: экономия = короткий промпт вместо длинного.
-        weighted_in = (cost - out / 1_000_000 * p["out"]) / max(1, prompt)
-        saved = (n_before - n_after) * weighted_in - compact_cost
-        verdict = "предотвращён промах"
-    else:
-        # Юзер вернулся раньше TTL — кэш был бы тёплым, сжатие в минус.
-        paid = cost
-        would_pay_warm = cost_of(n_before, "read", pend["model"]) + out / 1_000_000 * p["out"]
-        saved = would_pay_warm - paid - compact_cost
-        verdict = "кэш был бы тёплым (зря сжали)"
+    now = time.time()
+    started = kw.get("started_at") or now
+    gap = max(0.0, float(started) - float(pend["ts"]))
+    ttl = ttl_seconds(pend["model"])
+    saved, verdict, compact_cost = compute_saving(
+        n_before=pend["before"],
+        n_after=pend["after"],
+        facts=pend.get("facts") or {},
+        gap_s=gap,
+        ttl_s=ttl,
+        model=pend["model"],
+    )
 
     with _lock:
         st = _sess(sid)
@@ -222,118 +311,44 @@ def on_post_api_request(**kw) -> None:
         st["saved_usd"] += saved
         if saved > 0:
             st["profitable"] += 1
-            # Время: столько клиент ждал бы у порога в критическом пути
-            st["saved_s"] += threshold_compact_avg()
+            st["saved_s"] += float(pend.get("dur_s") or 0.0)
         else:
             st["wasted"] += 1
 
     ev = {
         "ev": "settle",
-        "ts": round(time.time(), 1),
+        "ts": round(now, 1),
         "session": sid,
         "model": pend["model"],
-        "before": n_before,
-        "after": n_after,
+        "before": pend["before"],
+        "after": pend["after"],
         "compact_cost_usd": round(compact_cost, 6),
         "compact_s": pend["dur_s"],
+        "facts": pend.get("facts"),
         "gap_s": round(gap, 1),
         "ttl_s": ttl,
         "verdict": verdict,
         "saved_usd": round(saved, 6),
-        "saved_wait_s": round(threshold_compact_avg(), 0) if saved > 0 else 0,
-        "prompt_tokens": prompt,
-        "cached_tokens": read,
+        "saved_wait_s": round(float(pend.get("dur_s") or 0.0), 1) if saved > 0 else 0,
     }
     _append(ev)
     logger.info(
         "idle-compact SAVINGS: %s | %s | пауза %.0f мин против TTL %.0f мин | "
-        "сжатие $%.5f | экономия $%.5f + %.0f сек ожидания",
+        "сжатие $%.5f | экономия $%+.5f",
         sid, verdict, gap / 60, ttl / 60, compact_cost, saved,
-        ev["saved_wait_s"],
     )
 
 
-def _ttl_seconds(model: str) -> int:
-    m = (model or "").strip().lower()
-    if "deepseek-v4" in m:
-        return 5100
-    return 600  # muse-spark и прочее
-
-
-# ── Время: сколько ждал бы клиент, если бы сжатие пришло в критический путь ──
-# Собственная длительность фонового сжатия клиенту не видна — считать её
-# «сэкономленным временем» бессмысленно. Считаем среднее по НАСТОЯЩИМ сжатиям
-# у порога (их видно в gateway.log: «Session hygiene: … auto-compressing» →
-# «… finished after the turn-hold was released»).
-THRESHOLD_COMPACT_DEFAULT_S = 60.0
-_AVG_CACHE: dict[str, float] = {"ts": 0.0, "value": THRESHOLD_COMPACT_DEFAULT_S}
-_AVG_TTL_S = 3600.0
-
-
-def threshold_compact_avg(days: int = 60) -> float:
-    """Средняя длительность сжатия у порога по gateway.log, с кэшем на час."""
-    now = time.time()
-    if now - _AVG_CACHE["ts"] < _AVG_TTL_S:
-        return _AVG_CACHE["value"]
-    value = THRESHOLD_COMPACT_DEFAULT_S
-    try:
-        import datetime as _dt
-        import re
-
-        log = _home() / "logs" / "gateway.log"
-        if log.exists():
-            lines = log.read_text(encoding="utf-8", errors="ignore").splitlines()
-            cutoff = _dt.datetime.now() - _dt.timedelta(days=days)
-
-            def _ts(s: str) -> _dt.datetime:
-                return _dt.datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
-
-            starts: dict[str, _dt.datetime] = {}
-            fins: dict[str, _dt.datetime] = {}
-            for i, line in enumerate(lines):
-                m = re.match(
-                    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ .*Session hygiene: .*auto-compressing",
-                    line,
-                )
-                if m:
-                    t0 = _ts(m.group(1))
-                    if t0 < cutoff:
-                        continue
-                    for nxt in lines[i:i + 4]:
-                        mm = re.search(r"for session (\S+)", nxt)
-                        if mm:
-                            starts[mm.group(1)] = t0
-                            break
-                    continue
-                m2 = re.match(
-                    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ .*Session hygiene compression "
-                    r"for session (\S+) finished",
-                    line,
-                )
-                if m2:
-                    fins[m2.group(2)] = _ts(m2.group(1))
-            durs = [
-                (fins[sid] - t0).total_seconds()
-                for sid, t0 in starts.items()
-                if sid in fins and (fins[sid] - t0).total_seconds() > 0
-            ]
-            if durs:
-                value = sum(durs) / len(durs)
-    except Exception:
-        logger.exception("idle-compact: threshold avg parse failed")
-    _AVG_CACHE["ts"] = now
-    _AVG_CACHE["value"] = value
-    return value
+# ── Сводка ───────────────────────────────────────────────────────────────
 
 
 def session_summary(session_id: str) -> dict:
-    """Сводка по сессии: деньги, время, сколько сжатий сработало в плюс/минус."""
     with _lock:
         st = _state.get(session_id)
         if not st:
             return {}
         durs = list(st["durs"])
-        avg = sum(durs) / len(durs) if durs else 60.0
+        avg = sum(durs) / len(durs) if durs else 0.0
         return {
             "saved_usd": round(st["saved_usd"], 5),
             "spent_usd": round(st["spent_usd"], 5),
@@ -352,15 +367,13 @@ def log_summary(session_id: str) -> None:
         return
     logger.info(
         "idle-compact SUMMARY: сессия %s | экономия $%.5f, потрачено $%.5f, "
-        "итого $%+.5f | съэкономлено времени %.0f сек | сжатий %d (в плюс %d, зря %d), "
-        "среднее сжатие %.0f сек",
-        session_id, s["saved_usd"], s["spent_usd"], s["net_usd"],
-        s["saved_s"], s["events"], s["profitable"], s["wasted"], s["avg_compact_s"],
+        "итого $%+.5f | время %.0f сек | сжатий %d (в плюс %d, зря %d), среднее %.0f сек",
+        session_id, s["saved_usd"], s["spent_usd"], s["net_usd"], s["saved_s"],
+        s["events"], s["profitable"], s["wasted"], s["avg_compact_s"],
     )
 
 
 def ledger_tail(limit: int = 20) -> list[dict]:
-    """Последние записи леджера — для ручной проверки."""
     try:
         lines = ledger_path().read_text(encoding="utf-8").splitlines()[-limit:]
         return [json.loads(x) for x in lines if x.strip()]
