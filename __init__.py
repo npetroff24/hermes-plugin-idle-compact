@@ -36,14 +36,30 @@ WRITE_ENABLED = True      # боевое сжатие включено
 ALLOWLIST: set[str] = set()
 
 TTL_BY_MODEL_SUBSTR: dict[str, int] = {  # секунды, longest-match wins
-    "deepseek-v4.1": 5100,
-    "deepseek-v4": 5100,
+    "deepseek-v4.1": 3300,   # 55 мин: кеш живёт 85–90 мин, но агент выселяется из кэша gateway на 60-й
+    "deepseek-v4": 3300,
     "muse-spark": 600,
 }
 TTL_FACTOR = 0.9
-# ВРЕМЕННО ДЛЯ ТЕСТА (откатить): мгновенный таймер и низкий гейт
-TEST_DELAY_SECONDS: float | None = None
-TEST_GATE_TOKENS: int | None = None  # тест пишущего пути; формула гейта (цельx1.5) проверена отдельно
+
+
+def _test_settings() -> dict:
+    """Тестовый режим без правки кода: ~/.hermes/idle_compact_test.json.
+
+    {"seconds": 300, "gate": 20000} — таймер и гейт для быстрой проверки.
+    Файла нет — обычный режим.
+    """
+    try:
+        import json
+
+        path = _home() / "idle_compact_test.json"
+        if not path.exists():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        logger.debug("idle-compact: test settings read failed", exc_info=True)
+        return {}
 GATE_K = 1.5
 THRESHOLD_TOKENS = 500_000   # сверено: compression.threshold_tokens (телеметрия)
 TARGET_RATIO = 0.2           # сверено: tokens_after ~0.2 x threshold
@@ -76,8 +92,6 @@ def _state_db() -> str:
     return str(_home() / "state.db")
 
 GATE_TOKENS = int(THRESHOLD_TOKENS * TARGET_RATIO * GATE_K)  # = 150000
-if TEST_GATE_TOKENS is not None:
-    GATE_TOKENS = TEST_GATE_TOKENS
 
 
 _warned_no_config = False
@@ -104,8 +118,12 @@ def _live_target() -> int | None:
 
 
 def _live_gate() -> int | None:
-    if TEST_GATE_TOKENS is not None:
-        return TEST_GATE_TOKENS
+    test = _test_settings()
+    if test.get("gate"):
+        try:
+            return int(test["gate"])
+        except Exception:
+            pass
     target = _live_target()
     return int(target * GATE_K) if target else None
 
@@ -122,8 +140,12 @@ def _ttl_for_model(model: str) -> int:
 
 
 def _delay_for_model(model: str) -> float:
-    if TEST_DELAY_SECONDS is not None:
-        return TEST_DELAY_SECONDS
+    test = _test_settings()
+    if test.get("seconds"):
+        try:
+            return float(test["seconds"])
+        except Exception:
+            pass
     return _ttl_for_model(model) * TTL_FACTOR
 
 
@@ -404,6 +426,13 @@ def _on_session_end(session_id: str = "", **kwargs) -> None:
 
 def _gate_floor(compressor) -> int | None:
     """Пол из живого порога компрессора + anti-thrash. Нет данных — None (скип)."""
+    # Тестовый режим: явный гейт из файла имеет приоритет.
+    test = _test_settings()
+    if test.get("gate"):
+        try:
+            return int(test["gate"])
+        except Exception:
+            pass
     target = None
     try:
         thr = int(getattr(compressor, "threshold_tokens", 0) or 0)
@@ -776,7 +805,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.6.1 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.6.2 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
