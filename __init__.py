@@ -677,10 +677,17 @@ _WARM_ENGINE = None
 
 
 def _on_pre_api_request(**kw) -> None:
-    """Запоминаем последний реальный запрос — он станет префиксом warm-сжатия."""
+    """Запоминаем последний реальный запрос — он станет префиксом warm-сжатия.
+
+    Хук отдаёт payload в обёртке ``{"method": "POST", "body": {...}}``
+    (см. ``_api_request_payload_for_hook``), поэтому тело разворачиваем.
+    """
     sid = kw.get("session_id") or ""
-    body = kw.get("request")
-    if not sid or not isinstance(body, dict):
+    raw = kw.get("request")
+    if not sid or not isinstance(raw, dict):
+        return
+    body = raw.get("body") if isinstance(raw.get("body"), dict) else raw
+    if not isinstance(body, dict) or not body:
         return
     try:
         import copy as _copy
@@ -697,6 +704,7 @@ def _on_pre_api_request(**kw) -> None:
         return
     with _captures_lock:
         _captures[sid] = entry
+    logger.debug("idle-compact: captured %s keys=%s mode=%s", sid, sorted(body)[:8], entry["api_mode"])
 
 
 def _capture_for(session_id: str) -> dict | None:
@@ -825,7 +833,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.6.4 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.6.5 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
