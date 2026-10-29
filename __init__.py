@@ -676,6 +676,31 @@ _captures_lock = threading.Lock()
 _WARM_ENGINE = None
 
 
+def _on_llm_execution(request=None, next_call=None, **kw) -> None:
+    """Полный запрос к провайдеру — до всякой обрезки хуков.
+
+    Хук ``pre_api_request`` урезает payload до 50 000 символов
+    (``HERMES_PLUGIN_PAYLOAD_MAX_CHARS``), поэтому для реальной истории
+    нужен middleware: он получает тот же dict, что уйдёт в провайдер.
+    """
+    try:
+        sid = kw.get("session_id") or ""
+        if sid and isinstance(request, dict):
+            body = {k: v for k, v in request.items() if k not in ("timeout", "http_client")}
+            if body:
+                with _captures_lock:
+                    _captures[sid] = {
+                        "body": body,
+                        "model": kw.get("model") or "",
+                        "base_url": kw.get("base_url") or "",
+                        "api_mode": kw.get("api_mode") or "",
+                        "ts": time.time(),
+                    }
+    except Exception:
+        logger.debug("idle-compact: middleware capture failed", exc_info=True)
+    return next_call(request)
+
+
 def _on_pre_api_request(**kw) -> None:
     """Запоминаем последний реальный запрос — он станет префиксом warm-сжатия.
 
@@ -823,8 +848,9 @@ def register(ctx) -> None:
         from . import savings
 
         ctx.register_hook("pre_api_request", _on_pre_api_request)
+        ctx.register_middleware("llm_execution", _on_llm_execution)
     except Exception:
-        logger.exception("idle-compact: не удалось подписаться на pre_api_request")
+        logger.exception("idle-compact: не удалось подписаться на захват запроса")
 
     ctx.register_hook("on_session_end", _on_session_end)
     try:
@@ -833,7 +859,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.6.5 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.6.6 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:

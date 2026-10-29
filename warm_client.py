@@ -63,6 +63,9 @@ def _instruction_row(prompt: str) -> dict:
 def build_payload(captured: dict, prompt: str, api_mode: str, max_tokens: int | None) -> dict:
     """Собрать warm-запрос: захваченный payload + инструкция в хвосте."""
     body = dict(captured)
+    # Двойная защита: хук может отдать обёртку {"method": "POST", "body": {...}}
+    if isinstance(body.get("body"), dict) and not ({"messages", "input"} & set(body)):
+        body = dict(body["body"])
     # служебные поля захвата, которых нет в реальном запросе
     for key in ("stream", "stream_options"):
         body.pop(key, None)
@@ -78,7 +81,7 @@ def build_payload(captured: dict, prompt: str, api_mode: str, max_tokens: int | 
         rows = list(body.get("messages") or [])
 
     if not rows:
-        raise WarmRefused("в захваченном запросе нет истории")
+        raise WarmRefused(f"в захваченном запросе нет истории (ключи: {sorted(body)[:10]})")
     rows.append(_instruction_row(prompt))
 
     if api_mode == "codex_responses":
