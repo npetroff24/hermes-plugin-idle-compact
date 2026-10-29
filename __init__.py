@@ -751,17 +751,36 @@ def _watchdog() -> None:
             logger.exception("idle-compact: watchdog tick failed")
 
 
+def _boot_async() -> None:
+    """Тяжёлая инициализация в стороне от register(): иначе ядро ругается
+    «load timed out after 10s» и плагин считается недогруженным."""
+
+    def _run() -> None:
+        time.sleep(2)
+        try:
+            from gateway.run import _gateway_runner_ref
+        except Exception:
+            return
+        try:
+            if _gateway_runner_ref() is None:
+                return
+        except Exception:
+            return
+        try:
+            _restore_pending()
+        except Exception:
+            logger.exception("idle-compact: pending restore failed")
+        try:
+            _start_watchdog()
+        except Exception:
+            logger.exception("idle-compact: watchdog start failed")
+
+    threading.Thread(target=_run, name="idle-compact-boot", daemon=True).start()
+
+
 def _start_watchdog() -> None:
     global _watchdog_started
     if _watchdog_started:
-        return
-    # Только в процессе, который держит gateway: иначе поток умрёт вместе с одноразовым процессом.
-    try:
-        from gateway.run import _gateway_runner_ref
-
-        if _gateway_runner_ref() is None:
-            return
-    except Exception:
         return
     _watchdog_started = True
     t = threading.Thread(target=_watchdog, name="idle-compact-watchdog", daemon=True)
@@ -805,17 +824,13 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.6.2 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.6.3 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
-        _restore_pending()
+        _boot_async()
     except Exception:
-        logger.exception("idle-compact: pending restore failed")
-    try:
-        _start_watchdog()
-    except Exception:
-        logger.exception("idle-compact: watchdog start failed")
+        logger.exception("idle-compact: boot failed")
 
 
 def unregister(ctx) -> None:
