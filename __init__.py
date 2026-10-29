@@ -477,11 +477,43 @@ def _do_compress(session_id: str, model: str, size: int, ctx) -> None:
                 kwargs["commit_fence"] = fence
 
             def run() -> None:
+                # Включаем warm-путь: префикс = последний реальный запрос сессии.
+                engine = getattr(agent, "context_compressor", None)
+                warm_on = False
+                cfg = _capture_for(session_id)
+                if engine is not None and hasattr(engine, "begin_warm"):
+                    try:
+                        engine.begin_warm(
+                            (cfg or {}).get("body"),
+                            {
+                                "base_url": (cfg or {}).get("base_url") or getattr(agent, "base_url", ""),
+                                "api_mode": (cfg or {}).get("api_mode") or getattr(agent, "api_mode", ""),
+                                "api_key": getattr(agent, "api_key", ""),
+                            },
+                        )
+                        warm_on = True
+                        if not cfg:
+                            logger.info("idle-compact: warm без захвата — сжатие пойдёт через aux")
+                    except Exception:
+                        logger.debug("idle-compact: begin_warm failed", exc_info=True)
                 try:
-                    agent._compress_context(messages, "", **kwargs)
-                except TypeError:
-                    kwargs.pop("commit_fence", None)
-                    agent._compress_context(messages, "", **kwargs)
+                    try:
+                        agent._compress_context(messages, "", **kwargs)
+                    except TypeError:
+                        kwargs.pop("commit_fence", None)
+                        agent._compress_context(messages, "", **kwargs)
+                finally:
+                    if warm_on and engine is not None:
+                        try:
+                            stats = engine.end_warm()
+                            if stats:
+                                logger.info(
+                                    "idle-compact WARM: cache_read=%s свежий_вход=%s выход=%s",
+                                    stats.get("cache_read"), stats.get("fresh_input"),
+                                    stats.get("output_tokens"),
+                                )
+                        except Exception:
+                            logger.debug("idle-compact: end_warm failed", exc_info=True)
 
             if ctx is not None:
                 ctx.run(run)
@@ -572,8 +604,76 @@ def _restore_pending() -> None:
         "idle-compact: pending restore done — restored %s, dropped %s", restored, dropped)
 
 
+# Захваченные запросы: session_id -> {"body": payload, "model", "base_url", "api_mode"}
+_captures: dict[str, dict] = {}
+_captures_lock = threading.Lock()
+# Свой движок (если ядро его приняло)
+_WARM_ENGINE = None
+
+
+def _on_pre_api_request(**kw) -> None:
+    """Запоминаем последний реальный запрос — он станет префиксом warm-сжатия."""
+    sid = kw.get("session_id") or ""
+    body = kw.get("request")
+    if not sid or not isinstance(body, dict):
+        return
+    try:
+        import copy as _copy
+
+        entry = {
+            "body": _copy.deepcopy(body),
+            "model": kw.get("model") or "",
+            "base_url": kw.get("base_url") or "",
+            "api_mode": kw.get("api_mode") or "",
+            "ts": time.time(),
+        }
+    except Exception:
+        logger.debug("idle-compact: capture copy failed", exc_info=True)
+        return
+    with _captures_lock:
+        _captures[sid] = entry
+
+
+def _capture_for(session_id: str) -> dict | None:
+    with _captures_lock:
+        entry = _captures.get(session_id)
+    if not entry:
+        return None
+    # Старше TTL кеша — префикс уже не тёплый, повтор бессмысленен
+    if time.time() - float(entry.get("ts") or 0) > 7200:
+        return None
+    return entry
+
+
 def register(ctx) -> None:
-    """Точка входа плагина: только подписка на хук, тяжёлого нет."""
+    """Точка входа плагина: движок, хук конца хода и хук захвата запроса."""
+    # Свой контекст-движок: штатный компрессор + warm-путь суммирования.
+    # Если не удастся зарегистрировать — плагин продолжит работать как раньше (aux-путь).
+    global _WARM_ENGINE
+    try:
+        from .warm_engine import IdleWarmCompressor, signature_ok
+
+        ok, why = signature_ok()
+        if not ok:
+            logger.warning("idle-compact: warm-движок отключён — %s", why)
+        else:
+            EngineClass = IdleWarmCompressor.build()
+            engine = EngineClass(model="")
+            if ctx.register_context_engine(engine) is not None:
+                _WARM_ENGINE = engine
+                logger.info("idle-compact: зарегистрирован свой контекст-движок (штатный компрессор + warm)")
+            else:
+                logger.warning("idle-compact: ядро не приняло контекст-движок — warm отключён")
+    except Exception:
+        logger.exception("idle-compact: регистрация warm-движка не удалась")
+
+    try:
+        from . import savings
+
+        ctx.register_hook("pre_api_request", _on_pre_api_request)
+    except Exception:
+        logger.exception("idle-compact: не удалось подписаться на pre_api_request")
+
     ctx.register_hook("on_session_end", _on_session_end)
     try:
         from . import savings
@@ -581,7 +681,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.4.3 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.6.0 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
