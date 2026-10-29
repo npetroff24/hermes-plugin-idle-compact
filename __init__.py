@@ -15,6 +15,7 @@ state.db в read-only и строки в лог вида «сжал бы N→M»
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sqlite3
@@ -198,6 +199,40 @@ def _pending_path() -> Path:
     return _home() / _PENDING_FILE
 
 
+@contextlib.contextmanager
+def _pending_guard():
+    """Эксклюзивный доступ к файлу состояния между процессами.
+
+    Без этого 89 загрузок плагина в сутки перетирали чужие записи: каждый
+    процесс писал «только то, что восстановил он», и таймеры терялись.
+    """
+    path = _pending_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(".lock")
+    fh = None
+    try:
+        fh = open(lock_path, "a+")
+        import fcntl
+
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        logger.debug("idle-compact: pending lock unavailable", exc_info=True)
+    try:
+        yield
+    finally:
+        if fh is not None:
+            try:
+                import fcntl
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+
 def _load_pending() -> dict[str, dict]:
     try:
         import json
@@ -223,14 +258,14 @@ def _save_pending(state: dict[str, dict]) -> None:
 
 
 def _remember(session_id: str, deadline: float, stamp: float, model: str) -> None:
-    with _timers_lock:
+    with _pending_guard():
         state = _load_pending()
         state[session_id] = {"deadline": deadline, "stamp": stamp, "model": model}
         _save_pending(state)
 
 
 def _forget(session_id: str) -> None:
-    with _timers_lock:
+    with _pending_guard():
         state = _load_pending()
         if state.pop(session_id, None) is not None:
             _save_pending(state)
@@ -645,6 +680,66 @@ def _capture_for(session_id: str) -> dict | None:
     return entry
 
 
+_watchdog_started = False
+
+
+def _sweep_due() -> int:
+    """Сработать по всем просроченным дедлайнам. Возвращает число запусков.
+
+    Нужен потому, что одиночный threading.Timer живёт только в своём процессе:
+    при reload/спавне он исчезает, и ожидание молча теряется.
+    """
+    now = time.time()
+    with _pending_guard():
+        state = _load_pending()
+        due = [(sid, e) for sid, e in state.items() if float(e.get("deadline") or 0) <= now]
+    fired = 0
+    for sid, entry in due:
+        try:
+            stamp = float(entry.get("stamp") or 0)
+            model = str(entry.get("model") or "")
+            deadline = float(entry.get("deadline") or 0)
+            ttl = _delay_for_model(model)
+            # Совсем старые дедлайны не трогаем: кеш давно мёртв, сожмёт ядро при возврате.
+            if now - deadline > max(ttl * 2, 3600):
+                _forget(sid)
+                logger.info("idle-compact: дедлайн %s устарел, ожидание снято", sid)
+                continue
+            logger.info("idle-compact: часовой догоняет дедлайн сессии %s", sid)
+            _fire(sid, stamp, model, None)
+            fired += 1
+        except Exception:
+            logger.exception("idle-compact: sweep failed for %s", sid)
+    return fired
+
+
+def _watchdog() -> None:
+    while True:
+        time.sleep(30)
+        try:
+            _sweep_due()
+        except Exception:
+            logger.exception("idle-compact: watchdog tick failed")
+
+
+def _start_watchdog() -> None:
+    global _watchdog_started
+    if _watchdog_started:
+        return
+    # Только в процессе, который держит gateway: иначе поток умрёт вместе с одноразовым процессом.
+    try:
+        from gateway.run import _gateway_runner_ref
+
+        if _gateway_runner_ref() is None:
+            return
+    except Exception:
+        return
+    _watchdog_started = True
+    t = threading.Thread(target=_watchdog, name="idle-compact-watchdog", daemon=True)
+    t.start()
+    logger.info("idle-compact: часовой запущен (проверка раз в 30 сек)")
+
+
 def register(ctx) -> None:
     """Точка входа плагина: движок, хук конца хода и хук захвата запроса."""
     # Свой контекст-движок: штатный компрессор + warm-путь суммирования.
@@ -681,13 +776,17 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.6.0 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.6.1 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
         _restore_pending()
     except Exception:
         logger.exception("idle-compact: pending restore failed")
+    try:
+        _start_watchdog()
+    except Exception:
+        logger.exception("idle-compact: watchdog start failed")
 
 
 def unregister(ctx) -> None:
