@@ -419,8 +419,9 @@ def _on_session_end(session_id: str = "", **kwargs) -> None:
     _remember(session_id, stamp + delay, stamp, model)
     gate = _live_gate()
     logger.info(
-        "idle-compact: timer %.0fs for session %s model %s (gate %s)",
+        "idle-compact: timer %.0fs for session %s model %s (gate %s | test=%s ttl=%s)",
         delay, session_id, model, gate if gate is not None else "n/a",
+        _test_settings() or "-", _ttl_for_model(model),
     )
 
 
@@ -824,7 +825,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.6.3 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.6.4 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
