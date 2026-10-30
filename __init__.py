@@ -331,31 +331,88 @@ def _forget(session_id: str) -> None:
 
 
 def _resident(session_id: str):
-    """(agent, compressor, route) живой сессии или None. Только чтение."""
+    """(agent, compressor, route) живой сессии или None. Только чтение.
+
+    Причину отсутствия пишем в лог (один раз за сессию): без неё диагностика
+    «api_size=n/a» бесполезна — непонятно, нет runner, нет ключа или нет агента.
+    """
     try:
         from gateway.run import _gateway_runner_ref, _cached_agent_for_hygiene
-    except Exception:
+    except Exception as exc:
+        _resident_reason(session_id, f"gateway import failed: {type(exc).__name__}")
         return None
     try:
         runner = _gateway_runner_ref()
-    except Exception:
+    except Exception as exc:
+        _resident_reason(session_id, f"runner_ref failed: {type(exc).__name__}")
         return None
     if runner is None:
+        desktop = _resident_desktop(session_id)
+        if desktop is not None:
+            return desktop
+        _resident_reason(session_id, "no gateway runner and no desktop session in this process")
         return None
     row = _session_row(session_id)
     route = (row.get("session_key") or "") if row else ""
     if not route:
+        _resident_reason(session_id, "session has no session_key in db")
         return None
     try:
         agent = _cached_agent_for_hygiene(runner, route)
-    except Exception:
+    except Exception as exc:
+        _resident_reason(session_id, f"cache lookup failed: {type(exc).__name__}")
         return None
     if agent is None:
+        desktop = _resident_desktop(session_id)
+        if desktop is not None:
+            return desktop
+        _resident_reason(session_id, f"agent evicted/absent (route={route[:40]})")
         return None
     comp = getattr(agent, "context_compressor", None)
     if comp is None:
+        _resident_reason(session_id, "agent has no context_compressor")
         return None
     return agent, comp, route
+
+
+def _resident_desktop(session_id: str):
+    """Живой агент desktop-сессии: tui_gateway держит его в своём реестре.
+
+    В процессе ``hermes serve`` нет gateway-runner, поэтому единственный
+    доступ к агенту — реестр ``tui_gateway.server._sessions``. Публичного
+    API для этого нет; все обращения обёрнуты в try/except, чтобы смена
+    внутренней структуры ломала только фоновое сжатие, а не сам агент.
+    """
+    try:
+        from tui_gateway import server as tui
+    except Exception:
+        return None
+    sessions = getattr(tui, "_sessions", None)
+    if not isinstance(sessions, dict):
+        return None
+    for _key, sess in list(sessions.items()):
+        if not isinstance(sess, dict):
+            continue
+        agent = sess.get("agent")
+        if agent is None:
+            continue
+        if getattr(agent, "session_id", None) == session_id or sess.get("session_key") == session_id:
+            comp = getattr(agent, "context_compressor", None)
+            if comp is None:
+                return None
+            return agent, comp, str(sess.get("session_key") or session_id)
+    return None
+
+
+_warned_resident: set[str] = set()
+
+
+def _resident_reason(session_id: str, reason: str) -> None:
+    """Один лог на сессию, чтобы не спамить каждый тик часового."""
+    if session_id in _warned_resident:
+        return
+    _warned_resident.add(session_id)
+    logger.info("idle-compact: нет живого агента для %s — %s", session_id, reason)
 
 
 def _estimate_history(comp, session_id: str) -> int | None:
@@ -932,7 +989,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.7.6 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.7.7 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
