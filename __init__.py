@@ -60,7 +60,8 @@ def _test_settings() -> dict:
     except Exception:
         logger.debug("idle-compact: test settings read failed", exc_info=True)
         return {}
-GATE_K = 1.5
+GATE_K = 2.0          # сжимаем только если контекст >= 2x цели сжатия
+DELAY_SECONDS_ALL = 270  # единый простой для всех моделей: 4.5 мин (5 мин x 0.9)
 THRESHOLD_TOKENS = 500_000   # сверено: compression.threshold_tokens (телеметрия)
 TARGET_RATIO = 0.2           # сверено: tokens_after ~0.2 x threshold
 HUMAN_SOURCES = {"telegram", "desktop", "cli", "tui", "messaging"}
@@ -146,7 +147,9 @@ def _delay_for_model(model: str) -> float:
             return float(test["seconds"])
         except Exception:
             pass
-    return _ttl_for_model(model) * TTL_FACTOR
+    # Единый простой для всех моделей. Отдельная карта TTL остаётся только
+    # для вердикта «был бы кеш тёплым» и отсечки устаревших дедлайнов.
+    return float(DELAY_SECONDS_ALL)
 
 
 def _rough_tokens(session_id: str) -> int:
@@ -859,7 +862,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.6.6 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.7.0 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
