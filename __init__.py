@@ -60,37 +60,9 @@ WRITE_ENABLED = True      # боевое сжатие включено
 # Пустой = все human-сессии; непустой = только перечисленные (тесты/откат)
 ALLOWLIST: set[str] = set()
 
-# Время жизни prompt-cache, секунды (замерено + официальные доки вендоров).
-# Задержка сжатия = TTL x 0.9. Неизвестная модель — DEFAULT_TTL_SECONDS.
-# Измерено на нашем трафике через вердикты SAVINGS:
-#   deepseek ~85 мин (в доках лишь "hours to days", точного TTL нет),
-#   muse-spark 10 мин.
-# Официальные дефолты: GPT in_memory 5–10 мин (у GPT-5.6+ дефолт 30 мин —
-# поднять после замера); Gemini explicit 1h, но агентский трафик идёт через
-# implicit с непубличным TTL — консервативно 10 мин; Claude/Kimi/Qwen/MiniMax
-# explicit 5 мин; GLM/Mistral/Grok точный TTL не публикуют — 5 мин.
-DEFAULT_TTL_SECONDS = 300
-TTL_BY_MODEL_SUBSTR: dict[str, int] = {
-    "deepseek": 5100,
-    "muse-spark": 600,
-    "spark": 600,
-    "gpt": 600,
-    "openai": 600,
-    "gemini": 600,
-    "google": 600,
-    "claude": 300,
-    "anthropic": 300,
-    "kimi": 300,
-    "moonshot": 300,
-    "qwen": 300,
-    "dashscope": 300,
-    "minimax": 300,
-    "glm": 300,
-    "zhipu": 300,
-    "mistral": 300,
-    "grok": 300,
-    "xai": 300,
-}
+# Единственный источник правды о TTL — model_ttl.py (его же читает savings.py).
+from .model_ttl import DEFAULT_TTL_SECONDS, TTL_BY_MODEL_SUBSTR, ttl_for_model
+
 TTL_FACTOR = 0.9
 
 
@@ -113,7 +85,6 @@ def _test_settings() -> dict:
         return {}
 GATE_K = 2.0          # сжимаем только если контекст >= 2x цели сжатия
 THRESHOLD_TOKENS = 500_000   # запасной порог, если конфиг нечитаем
-_ASSUMED_WINDOW_TOKENS = 1_000_000  # окно по умолчанию, если конфиг задаёт threshold долей
 TARGET_RATIO = 0.2           # сверено: tokens_after ~0.2 x threshold
 HUMAN_SOURCES = {"telegram", "desktop", "cli", "tui", "messaging", "local"}
 
@@ -149,11 +120,13 @@ GATE_TOKENS = int(THRESHOLD_TOKENS * TARGET_RATIO * GATE_K)  # = 150000
 _warned_no_config = False
 
 
-def _live_target() -> int | None:
+def _live_target(window_tokens: int | None = None) -> int | None:
     """Живая цель из config.yaml. Нет конфига — None (скип, не вшитое).
 
-    Понимает оба вида порога: threshold_tokens (токены) и threshold (доля
-    окна 0..1 — умножается на _ASSUMED_WINDOW_TOKENS; >1 считаем токенами).
+    Понимает оба вида порога: ``threshold_tokens`` (абсолютные токены) и
+    ``threshold`` (доля окна 0..1). Долю умножаем только на ФАКТИЧЕСКОЕ окно
+    модели (``window_tokens`` из живого компрессора); выдумывать окно нельзя —
+    иначе для модели с окном 200К цель завышается впятеро.
     """
     global _warned_no_config
     try:
@@ -164,7 +137,12 @@ def _live_target() -> int | None:
         thr = comp.get("threshold_tokens")
         if thr is None and comp.get("threshold") is not None:
             frac = float(comp.get("threshold"))
-            thr = int(frac * _ASSUMED_WINDOW_TOKENS) if frac <= 1 else int(frac)
+            if frac <= 1:
+                if not window_tokens or window_tokens <= 0:
+                    raise ValueError("threshold is a fraction, but model window is unknown")
+                thr = int(frac * int(window_tokens))
+            else:
+                thr = int(frac)
         ratio = comp.get("target_ratio")
         if ratio is None:
             ratio = TARGET_RATIO
@@ -190,14 +168,8 @@ def _live_gate() -> int | None:
 
 
 def _ttl_for_model(model: str) -> int:
-    m = (model or "").strip().lower()
-    best = -1
-    ttl = DEFAULT_TTL_SECONDS
-    for sub, t in TTL_BY_MODEL_SUBSTR.items():
-        if sub in m and len(sub) > best:
-            best = len(sub)
-            ttl = t
-    return ttl
+    """TTL модели из общего модуля model_ttl.py."""
+    return ttl_for_model(model)
 
 
 def _delay_for_model(model: str) -> float:
@@ -520,7 +492,9 @@ def _gate_floor(compressor) -> int | None:
     except Exception:
         target = None
     if target is None:
-        target = _live_target()
+        # Фактическое окно модели из живого компрессора — не выдуманное.
+        window = int(getattr(compressor, "context_length", 0) or 0)
+        target = _live_target(window_tokens=window or None)
     if target is None:
         return None
     floor = int(target * GATE_K)

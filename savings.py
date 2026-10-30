@@ -36,6 +36,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+try:  # обычная загрузка плагином
+    from .model_ttl import ttl_for_model
+except ImportError:  # одиночная загрузка в тестах
+    from model_ttl import ttl_for_model
+
 # ── Цены, $ за 1M токенов ────────────────────────────────────────────────
 # Замерено живьём на opencode-go 28.10.2026 (сверено с биллингом до 4-го знака):
 #   muse cold 40530 tok + 422 out = 0.0041374 | warm 40305 cached = 0.00022311
@@ -203,37 +208,8 @@ def compute_saving(
 
 
 def ttl_seconds(model: str) -> int:
-    # Зеркало TTL_BY_MODEL_SUBSTR из __init__ (savings не импортирует __init__
-    # из-за цикла): задержка вердикта = TTL x 0.9, longest-match wins.
-    m = (model or "").strip().lower()
-    table = {
-        "deepseek": 5100,
-        "muse-spark": 600,
-        "spark": 600,
-        "gpt": 600,
-        "openai": 600,
-        "gemini": 600,
-        "google": 600,
-        "claude": 300,
-        "anthropic": 300,
-        "kimi": 300,
-        "moonshot": 300,
-        "qwen": 300,
-        "dashscope": 300,
-        "minimax": 300,
-        "glm": 300,
-        "zhipu": 300,
-        "mistral": 300,
-        "grok": 300,
-        "xai": 300,
-    }
-    best = -1
-    ttl = 300
-    for sub, t in table.items():
-        if sub in m and len(sub) > best:
-            best = len(sub)
-            ttl = t
-    return ttl
+    """TTL кеша модели из общего модуля model_ttl.py (одна таблица на плагин)."""
+    return ttl_for_model(model)
 
 
 # ── Леджер ───────────────────────────────────────────────────────────────
