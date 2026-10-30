@@ -759,6 +759,13 @@ def _restore_pending() -> None:
         if (row.get("last_activity_at") or 0) > stamp:
             dropped += 1
             continue
+        # Дедлайн просрочен настолько, что кеш всё равно мёртв (реальный случай:
+        # рестарт через 2.5 часа после дедлайна, сжатие ушло холодным).
+        # Сжимать по такой метке бессмысленно — это сделает ядро при возврате.
+        ttl = _delay_for_model(model)
+        if now - deadline > max(ttl * 2, 3600):
+            dropped += 1
+            continue
         delay = max(0.0, deadline - now)
         with _timers_lock:
             old = _timers.pop(session_id, None)
@@ -999,7 +1006,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.7.8 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.7.9 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
