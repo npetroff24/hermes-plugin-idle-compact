@@ -357,6 +357,7 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
         # без threshold_tokens), иначе грубая оценка по config.yaml.
         floor = None
         exact = None
+        comp = None
         res = _resident(session_id)
         if res is not None:
             _, comp, _ = res
@@ -377,8 +378,11 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
         idle_min = (time.time() - last_ts) / 60 if last_ts else -1
         if size <= floor:
             logger.info(
-                "idle-compact: session %s size ~%d <= floor %d, skip",
+                "idle-compact: session %s size ~%d <= floor %d, skip "
+                "(api_size=%s estimate=%s)",
                 session_id, size, floor,
+                getattr(comp, "last_prompt_tokens", "n/a"),
+                exact,
             )
             return
         if DRY_RUN or not WRITE_ENABLED or (ALLOWLIST and session_id not in ALLOWLIST):
@@ -866,7 +870,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.7.1 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.7.2 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
