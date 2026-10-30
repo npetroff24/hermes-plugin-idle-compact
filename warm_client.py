@@ -82,6 +82,21 @@ def build_payload(captured: dict, prompt: str, api_mode: str, max_tokens: int | 
 
     if not rows:
         raise WarmRefused(f"в захваченном запросе нет истории (ключи: {sorted(body)[:10]})")
+    # Диагностика: без неё не видно, почему warm-запрос больше основного и не
+    # попадает в кеш (реальный случай: 124 087 против 101 599 токенов).
+    _chars = 0
+    for _r in rows:
+        _c = _r.get("content") if isinstance(_r, dict) else None
+        if isinstance(_c, str):
+            _chars += len(_c)
+        elif isinstance(_c, list):
+            _chars += sum(len(str(p.get("text") or "")) for p in _c if isinstance(p, dict))
+    logger.info(
+        "idle-warm: структура запроса — режим=%s строк=%d символов_истории=%d "
+        "ключи=%s instructions=%s",
+        api_mode, len(rows), _chars, sorted(body)[:12],
+        "да" if body.get("instructions") else "нет",
+    )
     rows.append(_instruction_row(prompt))
 
     if api_mode == "codex_responses":

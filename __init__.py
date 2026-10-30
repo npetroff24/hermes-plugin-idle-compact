@@ -818,6 +818,7 @@ def _on_llm_execution(request=None, next_call=None, **kw) -> None:
             }
             if body:
                 with _captures_lock:
+                    prev = _captures.get(sid)
                     _captures[sid] = {
                         "body": body,
                         "model": kw.get("model") or "",
@@ -825,6 +826,21 @@ def _on_llm_execution(request=None, next_call=None, **kw) -> None:
                         "api_mode": kw.get("api_mode") or "",
                         "ts": time.time(),
                     }
+                # Диагностика захвата: видно, что именно запомнили и насколько
+                # это совпадает с реально отправленным запросом.
+                if True:  # логируем каждый захват: нужно для сверки с реальным запросом
+                    _rows = body.get("input") or body.get("messages") or []
+                    _chars = 0
+                    for _r in _rows if isinstance(_rows, list) else []:
+                        _c = _r.get("content") if isinstance(_r, dict) else None
+                        if isinstance(_c, str):
+                            _chars += len(_c)
+                        elif isinstance(_c, list):
+                            _chars += sum(len(str(_p.get("text") or "")) for _p in _c if isinstance(_p, dict))
+                    logger.info(
+                        "idle-compact: захват сессии %s — ключи=%s строк=%d символов=%d",
+                        sid, sorted(body)[:12], len(_rows) if isinstance(_rows, list) else 0, _chars,
+                    )
     except Exception:
         logger.debug("idle-compact: middleware capture failed", exc_info=True)
     return next_call(request)
@@ -1006,7 +1022,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.7.9 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.8.0 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
