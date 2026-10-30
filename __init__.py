@@ -362,7 +362,11 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
             _, comp, _ = res
             floor = _gate_floor(comp)
             if floor is not None:
-                exact = _estimate_history(comp, session_id)
+                # Реальный размер последнего промпта из usage API: оценка по
+                # символам занижает в 2–3 раза (JSON, tool_calls, system prompt).
+                api_size = int(getattr(comp, "last_prompt_tokens", 0) or 0)
+                est = _estimate_history(comp, session_id)
+                exact = max(api_size, est or 0) or None
         if floor is None:
             gate = _live_gate()
             if gate is None:
@@ -862,7 +866,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.7.0 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.7.1 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
