@@ -31,9 +31,11 @@ tools и reasoning не ломаются.
 
 ## Логика
 
-1. После каждого хода — таймер (spark 9 мин, deepseek ~76 мин).
+1. После каждого хода — таймер TTL × 0.9 (боевые TTL по таблице
+   `TTL_BY_MODEL_SUBSTR`: deepseek 85 мин → 4590 сек, spark/gpt/gemini
+   10 мин → 540 сек, остальные 5 мин → 270 сек).
 2. Сработал: сессия тиха, источник human, размер > гейта
-   (гейт = цель × 1.5, цель = живой `threshold_tokens × target_ratio`).
+   (гейт = цель × 2, цель = живой `threshold_tokens × target_ratio`).
 3. Плагин захватывает последний реальный запрос (хук `pre_api_request`) и
    включает warm-путь на своём контекст-движке.
 4. Сжатие делает ядро (`resident._compress_context`): локи, cooldown,

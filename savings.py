@@ -59,6 +59,7 @@ _compacting: dict[str, dict] = {}
 
 def _home() -> Path:
     import os
+    import sys
 
     try:
         from hermes_constants import get_hermes_home
@@ -71,6 +72,10 @@ def _home() -> Path:
     env = os.environ.get("HERMES_HOME", "").strip()
     if env:
         return Path(os.path.expandvars(os.path.expanduser(env)))
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "").strip()
+        base = Path(local) if local else Path.home() / "AppData" / "Local"
+        return base / "hermes"
     return Path.home() / ".hermes"
 
 
@@ -198,10 +203,37 @@ def compute_saving(
 
 
 def ttl_seconds(model: str) -> int:
+    # Зеркало TTL_BY_MODEL_SUBSTR из __init__ (savings не импортирует __init__
+    # из-за цикла): задержка вердикта = TTL x 0.9, longest-match wins.
     m = (model or "").strip().lower()
-    if "deepseek-v4" in m:
-        return 5100
-    return 600
+    table = {
+        "deepseek": 5100,
+        "muse-spark": 600,
+        "spark": 600,
+        "gpt": 600,
+        "openai": 600,
+        "gemini": 600,
+        "google": 600,
+        "claude": 300,
+        "anthropic": 300,
+        "kimi": 300,
+        "moonshot": 300,
+        "qwen": 300,
+        "dashscope": 300,
+        "minimax": 300,
+        "glm": 300,
+        "zhipu": 300,
+        "mistral": 300,
+        "grok": 300,
+        "xai": 300,
+    }
+    best = -1
+    ttl = 300
+    for sub, t in table.items():
+        if sub in m and len(sub) > best:
+            best = len(sub)
+            ttl = t
+    return ttl
 
 
 # ── Леджер ───────────────────────────────────────────────────────────────

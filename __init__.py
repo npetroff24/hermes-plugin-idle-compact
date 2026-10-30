@@ -1,16 +1,12 @@
 """idle-compact — фоновое сжатие простаивающих сессий ДО истечения prompt-cache.
 
-Этап 0 (этот файл): только dry-run. Ни одной записи в БД, только чтение
-state.db в read-only и строки в лог вида «сжал бы N→M».
-Боевое сжатие появится следующим этапом за флагом WRITE_ENABLED.
-
 Логика:
 - после каждого хода (хук on_session_end) ставим/сбрасываем таймер сессии:
-  delay = TTL(модель) x 0.9 (spark 9 мин, deepseek ~76-85 мин);
+  delay = TTL(модель) x 0.9 (таблица TTL_BY_MODEL_SUBSTR + замер/дефолт);
 - таймер сработал: сессия всё ещё тиха, источник human, размер > гейта —
-  логируем «would compress», ничего не пишем;
-- гейт = цель x 1.5, цель = threshold_tokens x target_ratio
-  (сейчас 500000 x 0.2 = 100000 -> гейт 150000).
+  сжимаем ядром (штатный путь) с warm-суммированием по кешу;
+- гейт = цель x 2, цель = threshold_tokens x target_ratio
+  (живой порог компрессора; без него — из config.yaml).
 """
 
 from __future__ import annotations
@@ -26,8 +22,37 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+try:  # POSIX: flock для файла состояния между процессами
+    import fcntl
+except ImportError:
+    fcntl = None
+try:  # Windows: msvcrt вместо fcntl
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+
+def _lock_fh(fh) -> None:
+    """Эксклюзивная блокировка файла: fcntl на POSIX, msvcrt на Windows."""
+    if fcntl is not None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    elif msvcrt is not None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+    # иначе нечем лочить — работаем без лока (однопроцессный режим)
+
+
+def _unlock_fh(fh) -> None:
+    if fcntl is not None:
+        with contextlib.suppress(Exception):
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    elif msvcrt is not None:
+        with contextlib.suppress(Exception):
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+
 # ---------------------------------------------------------------------------
-# Конфиг (этап 0: всё константами; из config.yaml заберём следующим этапом)
+# Конфиг
 # ---------------------------------------------------------------------------
 
 DRY_RUN = False           # боевое: все human-сессии
@@ -35,10 +60,36 @@ WRITE_ENABLED = True      # боевое сжатие включено
 # Пустой = все human-сессии; непустой = только перечисленные (тесты/откат)
 ALLOWLIST: set[str] = set()
 
-TTL_BY_MODEL_SUBSTR: dict[str, int] = {  # секунды, longest-match wins
-    "deepseek-v4.1": 3300,   # 55 мин: кеш живёт 85–90 мин, но агент выселяется из кэша gateway на 60-й
-    "deepseek-v4": 3300,
+# Время жизни prompt-cache, секунды (замерено + официальные доки вендоров).
+# Задержка сжатия = TTL x 0.9. Неизвестная модель — DEFAULT_TTL_SECONDS.
+# Измерено на нашем трафике через вердикты SAVINGS:
+#   deepseek ~85 мин (в доках лишь "hours to days", точного TTL нет),
+#   muse-spark 10 мин.
+# Официальные дефолты: GPT in_memory 5–10 мин (у GPT-5.6+ дефолт 30 мин —
+# поднять после замера); Gemini explicit 1h, но агентский трафик идёт через
+# implicit с непубличным TTL — консервативно 10 мин; Claude/Kimi/Qwen/MiniMax
+# explicit 5 мин; GLM/Mistral/Grok точный TTL не публикуют — 5 мин.
+DEFAULT_TTL_SECONDS = 300
+TTL_BY_MODEL_SUBSTR: dict[str, int] = {
+    "deepseek": 5100,
     "muse-spark": 600,
+    "spark": 600,
+    "gpt": 600,
+    "openai": 600,
+    "gemini": 600,
+    "google": 600,
+    "claude": 300,
+    "anthropic": 300,
+    "kimi": 300,
+    "moonshot": 300,
+    "qwen": 300,
+    "dashscope": 300,
+    "minimax": 300,
+    "glm": 300,
+    "zhipu": 300,
+    "mistral": 300,
+    "grok": 300,
+    "xai": 300,
 }
 TTL_FACTOR = 0.9
 
@@ -61,10 +112,10 @@ def _test_settings() -> dict:
         logger.debug("idle-compact: test settings read failed", exc_info=True)
         return {}
 GATE_K = 2.0          # сжимаем только если контекст >= 2x цели сжатия
-DELAY_SECONDS_ALL = 270  # единый простой для всех моделей: 4.5 мин (5 мин x 0.9)
-THRESHOLD_TOKENS = 500_000   # сверено: compression.threshold_tokens (телеметрия)
+THRESHOLD_TOKENS = 500_000   # запасной порог, если конфиг нечитаем
+_ASSUMED_WINDOW_TOKENS = 1_000_000  # окно по умолчанию, если конфиг задаёт threshold долей
 TARGET_RATIO = 0.2           # сверено: tokens_after ~0.2 x threshold
-HUMAN_SOURCES = {"telegram", "desktop", "cli", "tui", "messaging"}
+HUMAN_SOURCES = {"telegram", "desktop", "cli", "tui", "messaging", "local"}
 
 _HERMES_HOME_FALLBACK = Path.home() / ".hermes"
 
@@ -99,7 +150,11 @@ _warned_no_config = False
 
 
 def _live_target() -> int | None:
-    """Живая цель из config.yaml. Нет конфига — None (скип, не вшитое)."""
+    """Живая цель из config.yaml. Нет конфига — None (скип, не вшитое).
+
+    Понимает оба вида порога: threshold_tokens (токены) и threshold (доля
+    окна 0..1 — умножается на _ASSUMED_WINDOW_TOKENS; >1 считаем токенами).
+    """
     global _warned_no_config
     try:
         import yaml
@@ -107,9 +162,14 @@ def _live_target() -> int | None:
             cfg = yaml.safe_load(fh) or {}
         comp = cfg.get("compression") or {}
         thr = comp.get("threshold_tokens")
+        if thr is None and comp.get("threshold") is not None:
+            frac = float(comp.get("threshold"))
+            thr = int(frac * _ASSUMED_WINDOW_TOKENS) if frac <= 1 else int(frac)
         ratio = comp.get("target_ratio")
-        if thr is None or ratio is None:
-            raise ValueError("no compression.threshold_tokens/target_ratio in config")
+        if ratio is None:
+            ratio = TARGET_RATIO
+        if thr is None:
+            raise ValueError("no compression.threshold_tokens/threshold in config")
         return int(int(thr) * float(ratio))
     except Exception as exc:
         if not _warned_no_config:
@@ -132,7 +192,7 @@ def _live_gate() -> int | None:
 def _ttl_for_model(model: str) -> int:
     m = (model or "").strip().lower()
     best = -1
-    ttl = 600
+    ttl = DEFAULT_TTL_SECONDS
     for sub, t in TTL_BY_MODEL_SUBSTR.items():
         if sub in m and len(sub) > best:
             best = len(sub)
@@ -147,9 +207,10 @@ def _delay_for_model(model: str) -> float:
             return float(test["seconds"])
         except Exception:
             pass
-    # Единый простой для всех моделей. Отдельная карта TTL остаётся только
-    # для вердикта «был бы кеш тёплым» и отсечки устаревших дедлайнов.
-    return float(DELAY_SECONDS_ALL)
+    # Задержка = TTL модели x 0.9: сжатие идёт пока кеш ещё жив.
+    # Карта TTL нужна также для вердикта «был бы кеш тёплым»
+    # и отсечки устаревших дедлайнов.
+    return float(_ttl_for_model(model)) * TTL_FACTOR
 
 
 def _rough_tokens(session_id: str) -> int:
@@ -191,7 +252,7 @@ def scan_candidates() -> list[dict]:
         cur = con.execute(
             "SELECT id, source, model, message_count, last_activity_at "
             "FROM sessions WHERE archived = 0 AND ended_at IS NULL "
-            "AND source IN ('telegram','desktop') "
+            "AND source IN ('telegram','desktop','cli','tui','messaging','local') "
             "ORDER BY last_activity_at DESC LIMIT 50"
         )
         rows = [dict(r) for r in cur.fetchall()]
@@ -236,10 +297,12 @@ def _pending_guard():
     lock_path = path.with_suffix(".lock")
     fh = None
     try:
-        fh = open(lock_path, "a+")
-        import fcntl
+        fh = open(lock_path, "a+b")
+        if msvcrt is not None and fcntl is None and fh.tell() == 0:
+            fh.write(b"\x00")  # msvcrt лочит байт-диапазон: файл не должен быть пустым
+            fh.flush()
 
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        _lock_fh(fh)
     except Exception:
         logger.debug("idle-compact: pending lock unavailable", exc_info=True)
     try:
@@ -247,9 +310,8 @@ def _pending_guard():
     finally:
         if fh is not None:
             try:
-                import fcntl
+                _unlock_fh(fh)
 
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
             except Exception:
                 pass
             try:
@@ -410,6 +472,10 @@ def _on_session_end(session_id: str = "", **kwargs) -> None:
         logger.exception("idle-compact: db read failed")
         return
     if not row or row.get("source") not in HUMAN_SOURCES:
+        logger.debug(
+            "idle-compact: session %s source %r not human, no timer",
+            session_id, (row or {}).get("source"),
+        )
         return
     model = row.get("model") or ""
     delay = _delay_for_model(model)
@@ -491,8 +557,10 @@ def _do_compress(session_id: str, model: str, size: int, ctx) -> None:
     if not getattr(agent, "compression_enabled", False):
         return
     if getattr(agent, "api_mode", "") == "codex_app_server":
+        logger.info("idle-compact: session %s api_mode=codex_app_server, skip", session_id)
         return
     if getattr(agent, "compression_checkpoint_required", False):
+        logger.info("idle-compact: session %s checkpoint required, skip", session_id)
         return
     comp = getattr(agent, "context_compressor", None)
     if comp is None:
@@ -502,8 +570,10 @@ def _do_compress(session_id: str, model: str, size: int, ctx) -> None:
     cd = getattr(comp, "get_active_compression_failure_cooldown", None)
     try:
         if callable(cd) and cd():
+            logger.info("idle-compact: session %s compressor cooldown, skip", session_id)
             return
     except Exception:
+        logger.info("idle-compact: session %s cooldown check failed, skip", session_id)
         return
     db = getattr(comp, "_session_db", None)
     get_conv = getattr(db, "get_messages_as_conversation", None)
@@ -846,7 +916,25 @@ def register(ctx) -> None:
             logger.warning("idle-compact: warm-движок отключён — %s", why)
         else:
             EngineClass = IdleWarmCompressor.build()
-            engine = EngineClass(model="")
+            # Цель и порог — из config.yaml: update_model() их не трогает,
+            # поэтому дефолты конструктора (0.5/0.2) остались бы навсегда.
+            eng_kwargs: dict = {"model": ""}
+            try:
+                import yaml
+
+                with open(str(_home() / "config.yaml"), "r", encoding="utf-8") as fh:
+                    _comp = (yaml.safe_load(fh) or {}).get("compression") or {}
+                if _comp.get("target_ratio") is not None:
+                    eng_kwargs["summary_target_ratio"] = float(_comp["target_ratio"])
+                if _comp.get("threshold") is not None and _comp.get("threshold_tokens") is None:
+                    _frac = float(_comp["threshold"])
+                    if _frac <= 1:
+                        eng_kwargs["threshold_percent"] = _frac
+                if _comp.get("threshold_tokens") is not None:
+                    eng_kwargs["threshold_tokens_cap"] = int(_comp["threshold_tokens"])
+            except Exception:
+                logger.debug("idle-compact: engine config unreadable, defaults", exc_info=True)
+            engine = EngineClass(**eng_kwargs)
             if ctx.register_context_engine(engine) is not None:
                 _WARM_ENGINE = engine
                 logger.info("idle-compact: зарегистрирован свой контекст-движок (штатный компрессор + warm)")
@@ -870,7 +958,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.7.2 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.7.5 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
