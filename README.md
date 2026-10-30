@@ -1,12 +1,101 @@
 # idle-compact
 
-Фоновое сжатие простаивающих чатов Hermes-агента — до истечения prompt-cache.
+Background compaction for idle Hermes-agent chats — before prompt-cache expiry.
 
-*English: background compaction for idle Hermes chats before prompt-cache
-expiry — zero waiting, cache-warm summaries (96–98% prefix hits vs ~0% for
-stock aux calls), per-model TTLs (DeepSeek ~85 min, Spark/GPT/Gemini ~10 min,
-others ~5 min), live gate from the core compressor, restart-proof timers,
-Windows + Linux, and a SAVINGS ledger for every dollar.*
+## The problem
+
+Long chats hit the context limit, and stock compression hurts three times:
+it fires mid-request — you wait tens of seconds; it computes **cold** — the
+aux call bypasses prompt-cache (~0% hits by our measurements), so every
+compaction is billed at full rate; and a long idle lets the cache expire
+completely — your next turn re-reads the whole context at full price.
+
+## Advantages
+
+1. **Zero waiting.** Compacts ahead of time, while idle — you come back to an
+   already-slim chat. No waiting on compaction, ever.
+2. **Cache-warm, not cache-blind.** The summary request repeats your last turn
+   and hits prompt-cache at 96–98% instead of 0% — the compaction itself costs
+   pennies.
+3. **Timing per model.** Every model has its own cache TTL: DeepSeek ~85 min,
+   Spark/GPT/Gemini ~10 min, Claude/Kimi/Qwen/MiniMax and the rest ~5 min.
+   Starts at 10% before expiry (TTL × 0.9).
+4. **Skips the small stuff.** The gate comes from the live core compressor
+   (target × 2) — short chats are skipped, nothing wasted.
+5. **Money is visible.** Every compaction logs SAVINGS: before → after, cost;
+   on your return — whether the entry was warm or cold and what was actually
+   saved.
+6. **Survives restarts.** Timers persist on disk — a gateway restart never
+   breaks a scheduled compaction.
+7. **Windows and Linux.** One codebase: locks via `msvcrt`/`fcntl`, paths via
+   `%LOCALAPPDATA%`/`~/.hermes`.
+
+Bottom line: smaller context — cheaper every answer, zero waiting, every
+number in the log.
+
+## Warm-path measurements (2026-10-29, opencode-go, live requests)
+
+| model | transport | cache_read | fresh input | cache hit |
+|---|---|---|---|---|
+| muse-spark-1.3-contributor | codex_responses | 1393 | 83 | 94% |
+| deepseek-v4.1-flash | chat_completions | 1792 | 46 | 97.5% |
+| minimax-m3.1-flash | anthropic_messages | 1920 | 153 | 92.6% |
+
+Summaries stay structural (Goal / Current state / Next step); tools and
+reasoning are unaffected.
+
+## How it works
+
+1. After every turn — a TTL × 0.9 timer (live TTLs in `TTL_BY_MODEL_SUBSTR`:
+   deepseek 85 min → 4590 s, spark/gpt/gemini 10 min → 540 s, rest 5 min →
+   270 s).
+2. On fire: session still quiet, human source, size above gate
+   (gate = target × 2, target = live `threshold_tokens × target_ratio`).
+3. The plugin grabs the last real request (`pre_api_request` hook) and enables
+   the warm path on its own context engine.
+4. The core does the compaction (`resident._compress_context`): locks,
+   cooldown, anti-thrash, watermark against races. The plugin only swaps the
+   summary LLM call — all middle-replacement logic stays core.
+5. Warm unavailable (no capture, route changed, error) — automatic fallback to
+   the stock aux path.
+6. Small/young/cron sessions are left alone.
+
+## Custom context engine
+
+The plugin registers `idle_warm` — a subclass of the stock `ContextCompressor`
+overriding a single method, `_call_summary_llm`. Nothing in the core is
+patched: plain subclassing of a public class.
+
+If the core changes that method's signature, the plugin disables warm and keeps
+working via aux (`inspect.signature` check at startup).
+
+Requires `context.engine: idle_warm` in config:
+
+```bash
+hermes config set context.engine idle_warm
+```
+
+## Install
+
+```bash
+hermes plugins install <git-url> --enable
+hermes config set context.engine idle_warm
+```
+
+## Rollback
+
+```bash
+hermes config set context.engine compressor
+hermes plugins disable idle-compact
+```
+
+Compaction archives rows (`active=0`), never deletes.
+
+---
+
+# idle-compact (на русском)
+
+Фоновое сжатие простаивающих чатов Hermes-агента — до истечения prompt-cache.
 
 ## Проблема
 
