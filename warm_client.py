@@ -91,11 +91,19 @@ def build_payload(captured: dict, prompt: str, api_mode: str, max_tokens: int | 
             _chars += len(_c)
         elif isinstance(_c, list):
             _chars += sum(len(str(p.get("text") or "")) for p in _c if isinstance(p, dict))
+    import json as _json
+    _instr = body.get("instructions") or ""
+    _tools = body.get("tools") or []
+    _cache_key = body.get("prompt_cache_key")
+    try:
+        _tools_chars = len(_json.dumps(_tools, ensure_ascii=False))
+    except Exception:
+        _tools_chars = -1
     logger.info(
-        "idle-warm: структура запроса — режим=%s строк=%d символов_истории=%d "
-        "ключи=%s instructions=%s",
-        api_mode, len(rows), _chars, sorted(body)[:12],
-        "да" if body.get("instructions") else "нет",
+        "idle-warm: структура — режим=%s строк=%d символов_истории=%d "
+        "instructions_символов=%d tools_символов=%d prompt_cache_key=%s store=%s",
+        api_mode, len(rows), _chars, len(_instr) if isinstance(_instr, str) else -1,
+        _tools_chars, _cache_key, body.get("store"),
     )
     rows.append(_instruction_row(prompt))
 

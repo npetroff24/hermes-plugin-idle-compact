@@ -828,19 +828,30 @@ def _on_llm_execution(request=None, next_call=None, **kw) -> None:
                     }
                 # Диагностика захвата: видно, что именно запомнили и насколько
                 # это совпадает с реально отправленным запросом.
-                if True:  # логируем каждый захват: нужно для сверки с реальным запросом
-                    _rows = body.get("input") or body.get("messages") or []
-                    _chars = 0
-                    for _r in _rows if isinstance(_rows, list) else []:
-                        _c = _r.get("content") if isinstance(_r, dict) else None
-                        if isinstance(_c, str):
-                            _chars += len(_c)
-                        elif isinstance(_c, list):
-                            _chars += sum(len(str(_p.get("text") or "")) for _p in _c if isinstance(_p, dict))
-                    logger.info(
-                        "idle-compact: захват сессии %s — ключи=%s строк=%d символов=%d",
-                        sid, sorted(body)[:12], len(_rows) if isinstance(_rows, list) else 0, _chars,
-                    )
+                # Диагностика захвата: те же метрики, что и у warm-запроса,
+                # чтобы сверять построчно и видеть источник расхождения.
+                _rows = body.get("input") or body.get("messages") or []
+                _chars = 0
+                for _r in _rows if isinstance(_rows, list) else []:
+                    _c = _r.get("content") if isinstance(_r, dict) else None
+                    if isinstance(_c, str):
+                        _chars += len(_c)
+                    elif isinstance(_c, list):
+                        _chars += sum(len(str(_p.get("text") or "")) for _p in _c if isinstance(_p, dict))
+                import json as _json
+                _instr = body.get("instructions") or ""
+                _tools = body.get("tools") or []
+                try:
+                    _tools_chars = len(_json.dumps(_tools, ensure_ascii=False))
+                except Exception:
+                    _tools_chars = -1
+                logger.info(
+                    "idle-compact: захват %s — строк=%d символов_истории=%d "
+                    "instructions_символов=%d tools_символов=%d cache_key=%s",
+                    sid, len(_rows) if isinstance(_rows, list) else 0, _chars,
+                    len(_instr) if isinstance(_instr, str) else -1, _tools_chars,
+                    body.get("prompt_cache_key"),
+                )
     except Exception:
         logger.debug("idle-compact: middleware capture failed", exc_info=True)
     return next_call(request)
@@ -1022,7 +1033,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.8.0 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.8.1 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
