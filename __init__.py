@@ -783,6 +783,11 @@ def _restore_pending() -> None:
 
 # Захваченные запросы: session_id -> {"body": payload, "model", "base_url", "api_mode"}
 _captures: dict[str, dict] = {}
+# Поля запроса, которые живут только на стороне SDK и не должны уходить провайдеру.
+_CLIENT_ONLY_KEYS = frozenset({
+    "timeout", "http_client", "extra_headers", "extra_body", "extra_query",
+    "max_retries", "stream", "stream_options",
+})
 _captures_lock = threading.Lock()
 # Свой движок (если ядро его приняло)
 _WARM_ENGINE = None
@@ -798,7 +803,12 @@ def _on_llm_execution(request=None, next_call=None, **kw) -> None:
     try:
         sid = kw.get("session_id") or ""
         if sid and isinstance(request, dict):
-            body = {k: v for k, v in request.items() if k not in ("timeout", "http_client")}
+            # Служебные поля SDK провайдер не принимает: "unknown parameter
+            # `extra_headers`" — реальная ошибка 400 из логов.
+            body = {
+                k: v for k, v in request.items()
+                if k not in _CLIENT_ONLY_KEYS
+            }
             if body:
                 with _captures_lock:
                     _captures[sid] = {
@@ -989,7 +999,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.7.7 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.7.8 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
