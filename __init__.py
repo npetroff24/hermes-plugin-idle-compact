@@ -845,6 +845,12 @@ def _on_llm_execution(request=None, next_call=None, **kw) -> None:
                     _tools_chars = len(_json.dumps(_tools, ensure_ascii=False))
                 except Exception:
                     _tools_chars = -1
+                try:  # отладочный дамп: нужен, чтобы воспроизвести warm вне плагина
+                    import json as _j
+                    (_home() / f"idle_capture_{sid}.json").write_text(
+                        _j.dumps(body, ensure_ascii=False), encoding="utf-8")
+                except Exception:
+                    pass
                 logger.info(
                     "idle-compact: захват %s — строк=%d символов_истории=%d "
                     "instructions_символов=%d tools_символов=%d cache_key=%s",
@@ -1033,7 +1039,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.8.1 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.8.2 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
