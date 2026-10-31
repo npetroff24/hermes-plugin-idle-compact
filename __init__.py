@@ -405,6 +405,7 @@ def _resident_desktop(session_id: str):
 
 
 _warned_resident: set[str] = set()
+_last_warm_usage: dict | None = None
 
 
 def _resident_reason(session_id: str, reason: str) -> None:
@@ -448,6 +449,8 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
         # без threshold_tokens), иначе грубая оценка по config.yaml.
         floor = None
         exact = None
+        global _last_warm_usage
+        _last_warm_usage = None
         comp = None
         res = _resident(session_id)
         if res is not None:
@@ -684,6 +687,8 @@ def _do_compress(session_id: str, model: str, size: int, ctx) -> None:
                         try:
                             stats = engine.end_warm()
                             if stats:
+                                global _last_warm_usage
+                                _last_warm_usage = stats
                                 logger.info(
                                     "idle-compact WARM: cache_read=%s свежий_вход=%s выход=%s",
                                     stats.get("cache_read"), stats.get("fresh_input"),
@@ -709,7 +714,7 @@ def _do_compress(session_id: str, model: str, size: int, ctx) -> None:
                 after = None
             try:
                 from . import savings
-                savings.end_compaction(session_id, after)
+                savings.end_compaction(session_id, after, warm_usage=_last_warm_usage)
                 savings.log_summary(session_id)
             except Exception:
                 logger.exception("idle-compact: savings end failed")
@@ -1039,7 +1044,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.8.3 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.8.4 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:

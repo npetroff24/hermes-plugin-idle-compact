@@ -256,14 +256,27 @@ def begin_compaction(session_id: str, model: str, before_tokens: int) -> None:
         }
 
 
-def end_compaction(session_id: str, after_tokens: int | None = None) -> None:
-    """Сжатие закончилось: фиксируем фактическую стоимость прохода."""
+def end_compaction(session_id: str, after_tokens: int | None = None,
+                   warm_usage: dict | None = None) -> None:
+    """Сжатие закончилось: фиксируем фактическую стоимость прохода.
+
+    ``warm_usage`` — usage warm-запроса (cache_read/input/output). Он идёт
+    напрямую к провайдеру, мимо Hermes, поэтому в счётчиках БД его нет и
+    без этого аргумента стоимость показывалась нулевой.
+    """
     with _lock:
         win = _compacting.pop(session_id, None)
         if not win:
             return
         dur = time.time() - win["start"]
         facts = delta(win.get("facts0") or {}, compression_counters(session_id))
+        if warm_usage:
+            facts = {
+                "input": int(warm_usage.get("fresh_input") or warm_usage.get("input") or 0),
+                "cache_read": int(warm_usage.get("cache_read") or 0),
+                "output": int(warm_usage.get("output_tokens") or 0),
+                "calls": 1,
+            }
         compact_cost = cost_of_facts(facts, win["model"])
         st = _sess(session_id)
         st["durs"].append(dur)
