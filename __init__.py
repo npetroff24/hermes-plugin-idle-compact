@@ -22,6 +22,17 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+def _yaml_module():
+    """Return a YAML module. PyYAML has no CPython 3.14 wheel, so prefer
+    the host's hermes_yaml (ruamel) facade when available."""
+    try:
+        import hermes_yaml
+        return hermes_yaml
+    except Exception:
+        import yaml
+        return yaml
+
+
 try:  # POSIX: flock для файла состояния между процессами
     import fcntl
 except ImportError:
@@ -130,7 +141,7 @@ def _live_target(window_tokens: int | None = None) -> int | None:
     """
     global _warned_no_config
     try:
-        import yaml
+        yaml = _yaml_module()
         with open(str(_home() / "config.yaml"), "r", encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh) or {}
         comp = cfg.get("compression") or {}
@@ -1006,7 +1017,7 @@ def register(ctx) -> None:
             # поэтому дефолты конструктора (0.5/0.2) остались бы навсегда.
             eng_kwargs: dict = {"model": ""}
             try:
-                import yaml
+                yaml = _yaml_module()
 
                 with open(str(_home() / "config.yaml"), "r", encoding="utf-8") as fh:
                     _comp = (yaml.safe_load(fh) or {}).get("compression") or {}
