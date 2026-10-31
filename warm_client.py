@@ -150,6 +150,14 @@ def request_summary(
     body = build_payload(captured, prompt, api_mode, max_tokens)
     url = _url(base_url, api_mode)
     data = json.dumps(body).encode()
+    # Отладочный дамп отправленного warm-тела: без него не видно, почему
+    # провайдер не находит кеш (вход 61k при захваченных 42k).
+    try:
+        from pathlib import Path as _P
+        _dump = _P.home() / ".hermes" / f"idle_warm_body_{api_mode}.json"
+        _dump.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
     req = urllib.request.Request(url, data=data, headers=_headers(api_key, api_mode, base_url), method="POST")
     try:
         ctx = ssl.create_default_context()
