@@ -181,32 +181,35 @@ def compute_saving(
 ) -> tuple[float, str, float, int]:
     """(экономия $, вердикт, стоимость сжатия $, ходов до окупаемости).
 
-    Экономия — это НЕ сравнение warm-вызова с холодным: она возникает из
-    того, что контекст стал короче, и все последующие ходы читают меньше.
+    Экономия = «сколько стоило бы БЕЗ автосжатия» минус «сколько стоило С ним».
 
-    ``before``/``after`` — размер контекста до и после сжатия. Сколько именно
-    токенов сэкономит следующий ход:
-      * кеш к моменту возврата мёртв (``gap_s >= ttl_s``) — вместо ``before``
-        свежих токенов читается ``after``, цена — fresh;
-      * кеш жив — обе величины читаются по цене read, выигрыш меньше.
+    Без автосжатия: пользователь возвращается, кеш уже истёк (сжатие делалось
+    как раз у границы TTL), поэтому весь ``before`` читается по полной цене
+    fresh — и так на каждом следующем ходу, пока контекст не сократится иначе.
 
-    ``compact_cost`` вычитается целиком: генерация саммари есть только в
-    мире со сжатием. Если выигрыш одного хода не покрывает сжатие, четвёртое
-    значение говорит, за сколько ходов оно окупится.
+    С автосжатием: контекст стал ``after``, а warm-запрос сразу прогрел под
+    него кеш, поэтому следующий ход читает ``after`` по цене read, плюс сама
+    стоимость сжатия.
+
+    Если пользователь вернулся РАНЬШЕ TTL, кеш был бы жив и без сжатия —
+    тогда baseline считается по цене read, и сжатие обычно в минусе на первом
+    ходу (четвёртое значение говорит, за сколько ходов оно окупится).
     """
     p = price_for(model)
-    delta = max(0, int(before) - int(after))
     compact_cost = cost_of_facts(facts, model)
     would_be_cold = gap_s >= ttl_s
+    baseline_price = p["fresh"] if would_be_cold else p["read"]
 
-    per_token = p["fresh"] if would_be_cold else p["read"]
-    gross = delta / 1_000_000 * per_token
-    saved = gross - compact_cost
+    baseline = max(0, int(before)) / 1_000_000 * baseline_price
+    with_compact = max(0, int(after)) / 1_000_000 * p["read"] + compact_cost
+    saved = baseline - with_compact
     verdict = "предотвращён холодный вход" if would_be_cold else "кеш был бы тёплым"
 
     payback = 0
-    if saved < 0 and gross > 0:
-        payback = int(-saved // gross) + 1
+    if saved < 0:
+        per_hop = (max(0, int(before)) - max(0, int(after))) / 1_000_000 * baseline_price
+        if per_hop > 0:
+            payback = int(-saved // per_hop) + 1
     return saved, verdict, compact_cost, payback
 
 

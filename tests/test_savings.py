@@ -131,41 +131,41 @@ class TestCompressionCounters(unittest.TestCase):
 
 
 class TestComputeSaving(unittest.TestCase):
-    def test_cold_case_saves_delta_tokens(self):
-        """Кеш умер бы: экономия = разница контекста по полной цене минус сжатие."""
+    def test_cold_baseline_is_whole_context_at_fresh(self):
+        """Без сжатия весь before читался бы по полной цене, со сжатием after по read."""
         facts = {"input": 0, "cache_read": 125_000, "output": 1_000, "calls": 1}
         saved, verdict, cost, payback = savings.compute_saving(
             before=125_000, after=25_000, facts=facts, gap_s=3600, ttl_s=600, model="muse-spark",
         )
         out_cost = 1_000 / 1e6 * 0.20
-        self.assertAlmostEqual(cost, 125_000 / 1e6 * 0.002 + out_cost, places=9)
-        expected = 100_000 / 1e6 * 0.10 - cost      # delta x fresh − сжатие
-        self.assertAlmostEqual(saved, expected, places=9)
+        cost_expected = 125_000 / 1e6 * 0.002 + out_cost
+        self.assertAlmostEqual(cost, cost_expected, places=9)
+        baseline = 125_000 / 1e6 * 0.10
+        with_compact = 25_000 / 1e6 * 0.002 + cost_expected
+        self.assertAlmostEqual(saved, baseline - with_compact, places=9)
         self.assertIn("холодный", verdict)
         self.assertGreater(saved, 0)
         self.assertEqual(payback, 0)
 
-    def test_warm_case_uses_read_price_and_may_be_negative(self):
-        """Кеш жив: дельта читается по цене кеша, выигрыш меньше — возможен минус."""
+    def test_warm_baseline_is_read_price(self):
+        """Вернулся раньше TTL: без сжатия тоже читалось бы по read — выигрыш мал."""
         facts = {"input": 0, "cache_read": 125_000, "output": 1_000, "calls": 1}
-        saved, verdict, cost, payback = savings.compute_saving(
+        saved, verdict, cost, _ = savings.compute_saving(
             before=125_000, after=25_000, facts=facts, gap_s=120, ttl_s=600, model="muse-spark",
         )
         self.assertIn("тёплым", verdict)
-        expected = 100_000 / 1e6 * 0.002 - cost
-        self.assertAlmostEqual(saved, expected, places=9)
-        if saved < 0:
-            self.assertGreater(payback, 0)
+        baseline = 125_000 / 1e6 * 0.002
+        with_compact = 25_000 / 1e6 * 0.002 + cost
+        self.assertAlmostEqual(saved, baseline - with_compact, places=9)
+        self.assertLess(saved, 0)          # сжатие дороже, чем экономит за один ход
 
     def test_no_reduction_is_pure_loss(self):
-        """Контекст не уменьшился — платим за сжатие впустую."""
         facts = {"input": 0, "cache_read": 40_000, "output": 1_000, "calls": 1}
         saved, _, cost, payback = savings.compute_saving(
             before=40_000, after=40_000, facts=facts, gap_s=3600, ttl_s=600, model="muse-spark",
         )
-        self.assertLess(saved, 0)
-        self.assertAlmostEqual(saved, -cost, places=9)
-        self.assertEqual(payback, 0)   # дельта нулевая — окупаемости не будет
+        self.assertAlmostEqual(saved, 40_000 / 1e6 * 0.10 - 40_000 / 1e6 * 0.002 - cost, places=9)
+        self.assertEqual(payback, 0)       # дельты нет — окупаемости не будет
 
     def test_ttl_boundary_is_cold(self):
         facts = {"input": 0, "cache_read": 100_000, "output": 100, "calls": 1}
