@@ -392,6 +392,18 @@ def _resident_desktop(session_id: str):
     if not isinstance(sessions, dict):
         _resident_reason(session_id, f"tui_gateway._sessions is {type(sessions).__name__}")
         return None
+    # Подробный снимок реестра: без него не видно, почему сессия не находится.
+    try:
+        _snap = []
+        for _k, _s in list(sessions.items())[:8]:
+            _a = _s.get("agent") if isinstance(_s, dict) else None
+            _snap.append(f"{str(_k)[:12]}→{getattr(_a, 'session_id', None)}")
+        logger.info(
+            "idle-compact: реестр desktop — сессий=%d, ищем=%s, состав=%s",
+            len(sessions), session_id[-12:], "; ".join(_snap) or "пусто",
+        )
+    except Exception:
+        pass
     for _key, sess in list(sessions.items()):
         if not isinstance(sess, dict):
             continue
@@ -1046,7 +1058,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.9.1 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.9.2 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
