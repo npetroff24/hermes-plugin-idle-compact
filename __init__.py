@@ -385,10 +385,12 @@ def _resident_desktop(session_id: str):
     """
     try:
         from tui_gateway import server as tui
-    except Exception:
+    except Exception as exc:
+        _resident_reason(session_id, f"tui_gateway import failed: {type(exc).__name__}: {exc}")
         return None
     sessions = getattr(tui, "_sessions", None)
     if not isinstance(sessions, dict):
+        _resident_reason(session_id, f"tui_gateway._sessions is {type(sessions).__name__}")
         return None
     for _key, sess in list(sessions.items()):
         if not isinstance(sess, dict):
@@ -1044,7 +1046,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.9.0 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.9.1 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
