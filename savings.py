@@ -297,7 +297,7 @@ def end_compaction(session_id: str, after_tokens: int | None = None,
             "facts": facts,
         }
     logger.info(
-        "idle-compact SAVINGS: сжатие %s: %d -> %d токенов, %.1f сек, "
+        "idle-compact SAVINGS: сжатие %s: %d -> %d токенов (после — оценка, уточнится на живом ходе), %.1f сек, "
         "факт input=%d cache_read=%d out=%d, стоило $%.5f (вызовов %d), ждём живой ход",
         session_id, win["before"], int(after_tokens or 0), dur,
         facts["input"], facts["cache_read"], facts["output"], compact_cost, facts["calls"],
@@ -330,6 +330,21 @@ def on_post_api_request(**kw) -> None:
     now = time.time()
     started = kw.get("started_at") or now
     gap = max(0.0, float(started) - float(pend["ts"]))
+
+    # Реальный размер контекста после сжатия: первый живой вызов после него.
+    # Оценка по символам занижала в 2.6 раза (32 704 против фактических 85 322),
+    # из-за чего «до» и «после» были несопоставимы.
+    try:
+        usage = kw.get("usage") or {}
+        real_after = int(usage.get("input_tokens") or 0) + int(
+            usage.get("cache_read_tokens") or usage.get("cache_read") or 0
+        )
+        if real_after <= 0:
+            real_after = int(usage.get("prompt_tokens") or usage.get("input") or 0)
+        if real_after > 0:
+            pend["after"] = real_after
+    except Exception:
+        pass
     ttl = ttl_seconds(pend["model"])
     saved, verdict, compact_cost, payback = compute_saving(
         before=int(pend.get("before") or 0),
