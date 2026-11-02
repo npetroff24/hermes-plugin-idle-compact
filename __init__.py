@@ -592,6 +592,9 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
         logger.exception("idle-compact: fire failed for %s", session_id)
 
 
+_post_api_seen: set[str] = set()
+
+
 def _on_post_api(session_id: str = "", **kwargs) -> None:
     """Ставим/сдвигаем таймер после каждого ответа модели.
 
@@ -601,7 +604,11 @@ def _on_post_api(session_id: str = "", **kwargs) -> None:
     ожидание держится на нём.
     """
     if not session_id:
+        logger.info("idle-compact: post_api hook reached WITHOUT session_id")
         return
+    if session_id not in _post_api_seen:
+        _post_api_seen.add(session_id)
+        logger.info("idle-compact: post_api hook reached %s", session_id)
     try:
         _on_session_end(session_id=session_id)
     except Exception:
@@ -1182,7 +1189,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.9.10 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.9.11 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
