@@ -156,13 +156,48 @@ def _live_target(window_tokens: int | None = None) -> int | None:
         return None
 
 
-def _live_gate() -> int | None:
+def _plugin_cfg() -> dict:
+    """Секция plugins.idle_compact из config.yaml (или пустой словарь)."""
+    try:
+        import yaml
+        with open(str(_home() / "config.yaml"), "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        return ((cfg.get("plugins") or {}).get("idle_compact") or {}) if isinstance(cfg, dict) else {}
+    except Exception:
+        return {}
+
+
+def _gate_fraction() -> float:
+    """Доля окна модели, после которой включается фоновое сжатие.
+
+    Задаётся в ``~/.hermes/idle_compact_test.json`` полем ``gate_fraction``
+    или в config.yaml как ``plugins.idle_compact.gate_fraction``. Ноль/нет —
+    работает прежняя формула 2 × цель.
+    """
+    test = _test_settings()
+    for src in (test.get("gate_fraction"), _plugin_cfg().get("gate_fraction")):
+        try:
+            if src is not None and float(src) > 0:
+                return float(src)
+        except Exception:
+            continue
+    return 0.0
+
+
+def _live_gate(comp=None) -> int | None:
     test = _test_settings()
     if test.get("gate"):
         try:
             return int(test["gate"])
         except Exception:
             pass
+    frac = _gate_fraction()
+    if frac > 0:
+        window = int(getattr(comp, "context_length", 0) or 0)
+        if window > 0:
+            # Порог от ФАКТИЧЕСКОГО окна модели: не зависит от lean/legacy,
+            # threshold и target_ratio — одна понятная величина.
+            return int(frac * window)
     target = _live_target()
     return int(target * GATE_K) if target else None
 
@@ -316,10 +351,36 @@ def _save_pending(state: dict[str, dict]) -> None:
         logger.exception("idle-compact: pending state write failed")
 
 
+def _pid_alive(pid: int) -> bool:
+    """Жив ли процесс-владелец дедлайна (POSIX и Windows)."""
+    if pid <= 0:
+        return False
+    try:
+        import os as _os
+        if _os.name == "nt":
+            import ctypes
+            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not h:
+                return False
+            ctypes.windll.kernel32.CloseHandle(h)
+            return True
+        _os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
 def _remember(session_id: str, deadline: float, stamp: float, model: str) -> None:
+    """Запомнить дедлайн вместе с pid процесса-владельца.
+
+    Пендинг общий для gateway и desktop. Без владельца чужой процесс забирал
+    дедлайн, не находил агента, удалял запись и скипал — ожидание терялось
+    навсегда (реальный случай 09:48).
+    """
     with _pending_guard():
         state = _load_pending()
-        state[session_id] = {"deadline": deadline, "stamp": stamp, "model": model}
+        state[session_id] = {"deadline": deadline, "stamp": stamp, "model": model,
+                             "pid": os.getpid()}
         _save_pending(state)
 
 
@@ -459,6 +520,15 @@ def _estimate_history(comp, session_id: str) -> int | None:
 def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
     with _timers_lock:
         _timers.pop(session_id, None)
+    # Чужой дедлайн (другого процесса) не трогаем: его разбудит владелец.
+    try:
+        with _pending_guard():
+            _entry = (_load_pending() or {}).get(session_id) or {}
+        _owner = int(_entry.get("pid") or 0)
+        if _owner and _owner != os.getpid() and _pid_alive(_owner):
+            return
+    except Exception:
+        pass
     _forget(session_id)
     try:
         row = _session_row(session_id)
@@ -490,7 +560,7 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
                 est = _estimate_history(comp, session_id)
                 exact = max(api_size, est or 0) or None
         if floor is None:
-            gate = _live_gate()
+            gate = _live_gate(comp)
             if gate is None:
                 logger.info("idle-compact: session %s no live gate, skip", session_id)
                 return
@@ -578,6 +648,11 @@ def _gate_floor(compressor) -> int | None:
             target = int(thr * ratio)
     except Exception:
         target = None
+    frac = _gate_fraction()
+    window_now = int(getattr(compressor, "context_length", 0) or 0)
+    if frac > 0 and window_now > 0:
+        # Порог от окна модели — приоритетнее цели и режима.
+        return int(frac * window_now)
     if target is None:
         # Фактическое окно модели из живого компрессора — не выдуманное.
         window = int(getattr(compressor, "context_length", 0) or 0)
@@ -956,7 +1031,15 @@ def _sweep_due() -> int:
     now = time.time()
     with _pending_guard():
         state = _load_pending()
-        due = [(sid, e) for sid, e in state.items() if float(e.get("deadline") or 0) <= now]
+        mine = os.getpid()
+        due = []
+        for sid, e in state.items():
+            if float(e.get("deadline") or 0) > now:
+                continue
+            owner = int(e.get("pid") or 0)
+            if owner and owner != mine and _pid_alive(owner):
+                continue  # чужой живой процесс сам разбудит своего агента
+            due.append((sid, e))
     fired = 0
     for sid, entry in due:
         try:
@@ -1082,7 +1165,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.9.8 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.9.9 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
