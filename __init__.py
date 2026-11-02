@@ -413,8 +413,17 @@ def _resident_desktop(session_id: str):
         if getattr(agent, "session_id", None) == session_id or sess.get("session_key") == session_id:
             comp = getattr(agent, "context_compressor", None)
             if comp is None:
+                _resident_reason(
+                    session_id,
+                    f"desktop agent has no context_compressor (dir has "
+                    f"{sum(1 for a in dir(agent) if 'compress' in a.lower())} similar attrs)",
+                )
                 return None
             return agent, comp, str(sess.get("session_key") or session_id)
+    _resident_reason(
+        session_id,
+        f"desktop registry has no match (keys: {[str(k)[:10] for k in list(sessions)[:5]]})",
+    )
     return None
 
 
@@ -423,10 +432,12 @@ _last_warm_usage: dict | None = None
 
 
 def _resident_reason(session_id: str, reason: str) -> None:
-    """Один лог на сессию, чтобы не спамить каждый тик часового."""
-    if session_id in _warned_resident:
-        return
-    _warned_resident.add(session_id)
+    """Причина отсутствия агента.
+
+    Логируем каждый раз: одноразовый лог уже стоил нескольких циклов отладки —
+    первая причина оставалась в прошлом, а последующие срабатывания молчали.
+    Таймер срабатывает раз в несколько минут, спама это не даёт.
+    """
     logger.info("idle-compact: нет живого агента для %s — %s", session_id, reason)
 
 
@@ -1067,7 +1078,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.9.6 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.9.7 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
