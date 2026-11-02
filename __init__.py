@@ -1052,6 +1052,10 @@ def register(ctx) -> None:
                         eng_kwargs["threshold_percent"] = _frac
                 if _comp.get("threshold_tokens") is not None:
                     eng_kwargs["threshold_tokens_cap"] = int(_comp["threshold_tokens"])
+                if _comp.get("tail_mode") is not None:
+                    _tm = str(_comp["tail_mode"]).strip().lower()
+                    if _tm in ("legacy", "lean"):
+                        eng_kwargs["tail_mode"] = _tm
             except Exception:
                 logger.debug("idle-compact: engine config unreadable, defaults", exc_info=True)
             engine = EngineClass(**eng_kwargs)
@@ -1078,7 +1082,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.9.7 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.9.8 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
