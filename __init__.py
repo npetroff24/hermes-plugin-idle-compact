@@ -467,8 +467,10 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
         _last_warm_usage = None
         comp = None
         res = _resident(session_id)
+        agent_live = None
+        route_live = ""
         if res is not None:
-            _, comp, _ = res
+            agent_live, comp, route_live = res
             floor = _gate_floor(comp)
             if floor is not None:
                 # Реальный размер последнего промпта из usage API: оценка по
@@ -502,7 +504,7 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
             return
         # -- боевое сжатие: allowlist как опциональный ограничитель --
         if WRITE_ENABLED and (not ALLOWLIST or session_id in ALLOWLIST):
-            _do_compress(session_id, model, size, ctx)
+            _do_compress(session_id, model, size, ctx, agent=agent_live, route=route_live)
             return
         logger.info("idle-compact: write path not yet enabled, skip %s", session_id)
     except Exception:
@@ -578,30 +580,37 @@ def _gate_floor(compressor) -> int | None:
     return floor
 
 
-def _do_compress(session_id: str, model: str, size: int, ctx) -> None:
-    """Боевое сжатие через resident-агента: весь коммит делает ядро."""
-    try:
-        from gateway.run import _gateway_runner_ref, _cached_agent_for_hygiene
-    except Exception:
-        logger.exception("idle-compact: gateway import failed")
-        return
-    runner = _gateway_runner_ref()
-    if runner is None:
-        logger.info("idle-compact: no gateway runner, skip %s", session_id)
-        return
-    row = _session_row(session_id)
-    route = (row.get("session_key") or "") if row else ""
-    if not route:
-        logger.info("idle-compact: no route for %s", session_id)
-        return
-    try:
-        agent = _cached_agent_for_hygiene(runner, route)
-    except Exception:
-        logger.exception("idle-compact: cached agent lookup failed")
-        return
+def _do_compress(session_id: str, model: str, size: int, ctx, agent=None, route: str = "") -> None:
+    """Боевое сжатие через resident-агента: весь коммит делает ядро.
+
+    ``agent`` приходит из ``_resident`` — он уже нашёл живого агента (в том
+    числе через реестр Desktop-процесса). Искать его здесь заново нельзя:
+    в ``hermes serve`` нет gateway-runner, и старая проверка скипала сессию,
+    хотя агент был на руках.
+    """
     if agent is None:
-        logger.info("idle-compact: no resident agent for %s, skip", session_id)
-        return
+        try:
+            from gateway.run import _gateway_runner_ref, _cached_agent_for_hygiene
+        except Exception:
+            logger.exception("idle-compact: gateway import failed")
+            return
+        runner = _gateway_runner_ref()
+        if runner is None:
+            logger.info("idle-compact: no gateway runner, skip %s", session_id)
+            return
+        row = _session_row(session_id)
+        route = (row.get("session_key") or "") if row else ""
+        if not route:
+            logger.info("idle-compact: no route for %s", session_id)
+            return
+        try:
+            agent = _cached_agent_for_hygiene(runner, route)
+        except Exception:
+            logger.exception("idle-compact: cached agent lookup failed")
+            return
+        if agent is None:
+            logger.info("idle-compact: no resident agent for %s, skip", session_id)
+            return
     if not getattr(agent, "compression_enabled", False):
         return
     if getattr(agent, "api_mode", "") == "codex_app_server":
@@ -1058,7 +1067,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.9.4 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.9.5 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
