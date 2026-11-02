@@ -592,6 +592,22 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
         logger.exception("idle-compact: fire failed for %s", session_id)
 
 
+def _on_post_api(session_id: str = "", **kwargs) -> None:
+    """Ставим/сдвигаем таймер после каждого ответа модели.
+
+    Хук ``on_session_end`` в Desktop-процессе не вызывается вовсе (проверено:
+    после перезапуска 12:56 таймеры перестали ставиться, хотя ходы шли).
+    ``post_api_request`` приходит на каждый ход и в обоих процессах, поэтому
+    ожидание держится на нём.
+    """
+    if not session_id:
+        return
+    try:
+        _on_session_end(session_id=session_id)
+    except Exception:
+        logger.exception("idle-compact: timer hook failed for %s", session_id)
+
+
 def _on_session_end(session_id: str = "", **kwargs) -> None:
     if not session_id:
         return
@@ -1159,13 +1175,14 @@ def register(ctx) -> None:
         logger.exception("idle-compact: не удалось подписаться на захват запроса")
 
     ctx.register_hook("on_session_end", _on_session_end)
+    ctx.register_hook("post_api_request", _on_post_api)
     try:
         from . import savings
         ctx.register_hook("post_api_request", savings.on_post_api_request)
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.9.9 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.9.10 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:
