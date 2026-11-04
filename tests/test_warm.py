@@ -125,6 +125,32 @@ class TestApplyWarm(unittest.TestCase):
                           prompt="p", api_mode="chat_completions", base_url="", api_key="")
 
 
+class TestAffinityHeader(unittest.TestCase):
+    def test_session_key_used_when_given(self):
+        h = wc._headers("k", "codex_responses", "https://opencode.ai/zen/go/v1",
+                        session_key="20261027_054524_0c574947")
+        self.assertEqual(h["x-opencode-session"], "20261027_054524_0c574947")
+
+    def test_fallback_idle_warm_without_key(self):
+        h = wc._headers("k", "codex_responses", "https://opencode.ai/zen/go/v1")
+        self.assertEqual(h["x-opencode-session"], "idle-warm")
+
+    def test_no_header_off_opencode_without_key(self):
+        h = wc._headers("k", "chat_completions", "https://x/v1")
+        self.assertNotIn("x-opencode-session", h)
+
+    def test_conversation_key_matches_session(self):
+        """Ключ разговора совпадает с session_id (нормализация — тождество)."""
+        sys.path.insert(0, "/usr/local/lib/hermes-agent")
+        key = wc._conversation_session_key(
+            "opencode-go", "https://opencode.ai/zen/go/v1", "20261027_054524_0c574947")
+        self.assertEqual(key, "20261027_054524_0c574947")
+
+    def test_conversation_key_none_off_target(self):
+        key = wc._conversation_session_key(None, "https://x/v1", "s")
+        self.assertIsNone(key)
+
+
 class TestEngineSignature(unittest.TestCase):
     def test_signature_matches_kernel(self):
         """Если ядро сменит сигнатуру _call_summary_llm — warm должен отключиться, а не падать."""

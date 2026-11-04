@@ -801,6 +801,8 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None, route:
                                 "base_url": (cfg or {}).get("base_url") or getattr(agent, "base_url", ""),
                                 "api_mode": (cfg or {}).get("api_mode") or getattr(agent, "api_mode", ""),
                                 "api_key": getattr(agent, "api_key", ""),
+                                "session_id": session_id,
+                                "provider": getattr(agent, "provider", ""),
                             },
                         )
                         warm_on = True
@@ -1189,7 +1191,7 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.9.11 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.9.12 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
     try:

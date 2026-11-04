@@ -157,6 +157,8 @@ class IdleWarmCompressor:
                             base_url=route.get("base_url") or self.base_url,
                             api_key=route.get("api_key") or self.api_key,
                             max_tokens=self._warm_max_tokens(),
+                            session_id=route.get("session_id"),
+                            provider=route.get("provider") or getattr(self, "provider", ""),
                         )
                         with self._warm_lock:
                             self._warm_stats = stats

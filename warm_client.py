@@ -30,7 +30,29 @@ class WarmRefused(RuntimeError):
     """Warm-путь неприменим — вызывающий должен откатиться на aux-суммаризацию."""
 
 
-def _headers(api_key: str, api_mode: str, base_url: str) -> dict[str, str]:
+def _conversation_session_key(
+    provider: str | None, base_url: str, session_id: str | None
+) -> str | None:
+    """Ключ разговора для ``x-opencode-session`` — тот же, что у живых ходов.
+
+    Релей пинит запросы с одинаковым значением на один бэкенд, где жив
+    prompt-cache сессии. Warm слал ``"idle-warm"`` и попадал на чужой бэкенд:
+    замер 04.11 — то же тело с чужим ключом даёт ``cache_read=0``, со своим
+    99%. Ядро считает ключ через ``agent.opencode_affinity`` (ambient scope,
+    стабильный при ротации сессии); здесь тот же вызов с нашим session_id.
+    Вне opencode-целей — None (вызывающий оставит прежнее поведение).
+    """
+    try:
+        from agent.opencode_affinity import opencode_session_headers
+
+        headers = opencode_session_headers(provider, base_url, session_id)
+        key = (headers or {}).get("x-opencode-session")
+        return str(key) if key else None
+    except Exception:
+        return None
+
+
+def _headers(api_key: str, api_mode: str, base_url: str, session_key: str | None = None) -> dict[str, str]:
     h = {
         "Content-Type": "application/json",
         "User-Agent": "HermesAgent/0.22.5",
@@ -40,9 +62,13 @@ def _headers(api_key: str, api_mode: str, base_url: str) -> dict[str, str]:
         h["anthropic-version"] = "2023-06-01"
     else:
         h["Authorization"] = f"Bearer {api_key}"
-    # opencode-релеи требуют идентификатор сессии для маршрутизации
+    # opencode-релеи требуют идентификатор сессии для маршрутизации.
+    # Ключ — ключа разговора (тот же бэкенд и кеш, что у живых ходов);
+    # "idle-warm" только как запасной для неизвестных целей.
     if "opencode.ai" in (base_url or ""):
-        h["x-opencode-session"] = "idle-warm"
+        h["x-opencode-session"] = session_key or "idle-warm"
+    elif session_key:
+        h["x-opencode-session"] = session_key
     return h
 
 
@@ -144,7 +170,8 @@ def _extract_text(data: dict, api_mode: str) -> str:
 
 def request_summary(
     *, captured: dict, prompt: str, api_mode: str, base_url: str, api_key: str,
-    max_tokens: int | None = None,
+    max_tokens: int | None = None, session_id: str | None = None,
+    provider: str | None = None,
 ) -> tuple[str, dict]:
     """Выполнить warm-запрос. Возвращает (текст саммари, usage)."""
     body = build_payload(captured, prompt, api_mode, max_tokens)
@@ -158,7 +185,16 @@ def request_summary(
         _dump.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
-    req = urllib.request.Request(url, data=data, headers=_headers(api_key, api_mode, base_url), method="POST")
+    session_key = _conversation_session_key(provider, base_url, session_id)
+    try:
+        logger.info(
+            "idle-warm: affinity sesskey=%s (sid=%s)",
+            (session_key[:14] + "…") if session_key else "-",
+            (session_id or "-")[:24],
+        )
+    except Exception:
+        pass
+    req = urllib.request.Request(url, data=data, headers=_headers(api_key, api_mode, base_url, session_key), method="POST")
     try:
         ctx = ssl.create_default_context()
         with urllib.request.urlopen(req, timeout=TIMEOUT, context=ctx) as resp:
@@ -194,7 +230,8 @@ def request_summary(
 
 def apply_warm(
     *, captured: dict, prompt: str, api_mode: str, base_url: str, api_key: str,
-    max_tokens: int | None = None,
+    max_tokens: int | None = None, session_id: str | None = None,
+    provider: str | None = None,
 ) -> tuple[str, dict]:
     """Проверить применимость и выполнить warm-запрос."""
     if not captured:
@@ -206,4 +243,5 @@ def apply_warm(
     return request_summary(
         captured=captured, prompt=prompt, api_mode=api_mode,
         base_url=base_url, api_key=api_key, max_tokens=max_tokens,
+        session_id=session_id, provider=provider,
     )
