@@ -1,6 +1,12 @@
 name: idle-compact
-version: 0.9.12
+version: 0.9.13
 description: "Фоновое сжатие простаивающих сессий до истечения prompt-cache (beta)."
 author: "custom"
 kind: standalone
 provides_hooks: ["on_session_end", "post_api_request", "pre_api_request"]
+config_schema:
+  auto_compact_ratio:
+    type: float
+    default: 0.2
+    label: "Порог автосжатия (доля окна модели)"
+    description: "Фоновое сжатие стартует на простое, когда контекст больше этой доли окна модели. 0.2 при пороге ядра 0.5 — раньше штатного сжатия, пока жив prompt-cache."

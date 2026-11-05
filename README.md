@@ -20,8 +20,9 @@ completely — your next turn re-reads the whole context at full price.
 3. **Timing per model.** Every model has its own cache TTL: DeepSeek ~85 min,
    Spark/GPT/Gemini ~10 min, Claude/Kimi/Qwen/MiniMax and the rest ~5 min.
    Starts at 10% before expiry (TTL × 0.9).
-4. **Skips the small stuff.** The gate comes from the live core compressor
-   (target × 2) — short chats are skipped, nothing wasted.
+4. **Skips the small stuff.** The gate is a share of the model window
+   (default 0.2, set it in the Plugins hub) — short chats are skipped,
+   nothing wasted.
 5. **Money is visible.** Every compaction logs SAVINGS: before → after, cost;
    on your return — whether the entry was warm or cold and what was actually
    saved.
@@ -50,7 +51,9 @@ reasoning are unaffected.
    deepseek 85 min → 4590 s, spark/gpt/gemini 10 min → 540 s, rest 5 min →
    270 s).
 2. On fire: session still quiet, human source, size above gate
-   (gate = target × 2, target = live `threshold_tokens × target_ratio`).
+   (gate = auto_compact_ratio × model window, default 0.2; overrides:
+   Plugins-hub field, then `plugins.idle_compact.gate_fraction`, then
+   2 × live `threshold_tokens × target_ratio`).
 3. The plugin grabs the last real request (`pre_api_request` hook) and enables
    the warm path on its own context engine.
 4. The core does the compaction (`resident._compress_context`): locks,
@@ -82,11 +85,22 @@ hermes plugins install <git-url> --enable
 hermes config set context.engine idle_warm
 ```
 
+Optional: auto-compaction threshold as a share of the model window (default
+0.2 = twice the core target at stock 0.50/0.20) — also available as a field in
+the Desktop/TUI Plugins hub:
+
+```bash
+hermes config set plugins.idle_compact.gate_fraction 0.3
+```
+
+Lean is the core default tail mode; nothing to configure.
+
 ## Rollback
 
 ```bash
 hermes config set context.engine compressor
 hermes plugins disable idle-compact
+rm ~/.hermes/idle_compact_pending.json ~/.hermes/idle_capture_*.json ~/.hermes/idle_warm_body_*.json
 ```
 
 Compaction archives rows (`active=0`), never deletes.
@@ -115,8 +129,8 @@ Compaction archives rows (`active=0`), never deletes.
 3. **Момент подбирает сам.** У каждой модели свой TTL кеша: DeepSeek ~85 мин,
    Spark/GPT/Gemini ~10 мин, Claude/Kimi/Qwen/MiniMax и остальные ~5 мин.
    Старт за 10% до протухания (TTL × 0.9).
-4. **Мелочь не жмёт.** Порог берёт у живого компрессора ядра (цель × 2) —
-   короткие чаты пропускает, зря не тратит.
+4. **Мелочь не жмёт.** Порог — доля окна модели (дефолт 0.2, меняется
+   в хабе плагинов) — короткие чаты пропускаются, ничего не тратится.
 5. **Деньги видны.** После каждого сжатия пишет SAVINGS: было → стало, цена;
    на вашем возврате — тёплым или холодным был вход и сколько реально
    сэкономлено.
@@ -145,7 +159,9 @@ tools и reasoning не ломаются.
    `TTL_BY_MODEL_SUBSTR`: deepseek 85 мин → 4590 сек, spark/gpt/gemini
    10 мин → 540 сек, остальные 5 мин → 270 сек).
 2. Сработал: сессия тиха, источник human, размер > гейта
-   (гейт = цель × 2, цель = живой `threshold_tokens × target_ratio`).
+   (гейт = auto_compact_ratio × окно модели, дефолт 0.2; переопределения:
+   поле в хабе плагинов, затем `plugins.idle_compact.gate_fraction`, затем
+   2 × живой `threshold_tokens × target_ratio`).
 3. Плагин захватывает последний реальный запрос (хук `pre_api_request`) и
    включает warm-путь на своём контекст-движке.
 4. Сжатие делает ядро (`resident._compress_context`): локи, cooldown,
@@ -177,11 +193,21 @@ hermes plugins install <git-url> --enable
 hermes config set context.engine idle_warm
 ```
 
+Опционально: порог автосжатия как доля окна модели (дефолт 0.2 = две цели
+при стоковых 0.50/0.20) — есть и полем в хабе плагинов Desktop/TUI:
+
+```bash
+hermes config set plugins.idle_compact.gate_fraction 0.3
+```
+
+Хвост lean — дефолт ядра, настраивать нечего.
+
 ## Откат
 
 ```bash
 hermes config set context.engine compressor
 hermes plugins disable idle-compact
+rm ~/.hermes/idle_compact_pending.json ~/.hermes/idle_capture_*.json ~/.hermes/idle_warm_body_*.json
 ```
 
 Сжатие архивирует строки (`active=0`), не удаляет.

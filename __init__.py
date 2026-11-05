@@ -127,6 +127,9 @@ def _live_target(window_tokens: int | None = None) -> int | None:
     ``threshold`` (доля окна 0..1). Долю умножаем только на ФАКТИЧЕСКОЕ окно
     модели (``window_tokens`` из живого компрессора); выдумывать окно нельзя —
     иначе для модели с окном 200К цель завышается впятеро.
+
+    Без секции в конфиге — дефолты ядра (порог 0.50, для окон <512К пол 0.75),
+    чтобы на чистой установке плагин работал, а не молчал.
     """
     global _warned_no_config
     try:
@@ -143,6 +146,10 @@ def _live_target(window_tokens: int | None = None) -> int | None:
                 thr = int(frac * int(window_tokens))
             else:
                 thr = int(frac)
+        if thr is None and window_tokens and window_tokens > 0:
+            # Дефолт ядра: 0.50 окна, пол 0.75 для окон <512К.
+            frac = 0.75 if int(window_tokens) < 512 * 1024 else 0.50
+            thr = int(frac * int(window_tokens))
         ratio = comp.get("target_ratio")
         if ratio is None:
             ratio = TARGET_RATIO
@@ -167,13 +174,42 @@ def _plugin_cfg() -> dict:
         return {}
 
 
+def _hub_auto_ratio() -> float:
+    """Порог автосжатия из хаба настроек (`plugins.entries.*.settings`)."""
+    try:
+        import yaml
+        with open(str(_home() / "config.yaml"), "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        entries = (cfg.get("plugins") or {}).get("entries") or {}
+        if not isinstance(entries, dict):
+            return 0.0
+        ordered = []
+        if isinstance(entries.get("idle-compact"), dict):
+            ordered.append(entries["idle-compact"])
+        ordered.extend(v for k, v in entries.items()
+                       if k != "idle-compact" and isinstance(v, dict))
+        for entry in ordered:
+            settings = entry.get("settings")
+            if not isinstance(settings, dict):
+                continue
+            val = settings.get("auto_compact_ratio")
+            if val is not None and float(val) > 0:
+                return float(val)
+    except Exception:
+        pass
+    return 0.0
+
+
 def _gate_fraction() -> float:
     """Доля окна модели, после которой включается фоновое сжатие.
 
-    Задаётся в ``~/.hermes/idle_compact_test.json`` полем ``gate_fraction``
-    или в config.yaml как ``plugins.idle_compact.gate_fraction``. Ноль/нет —
-    работает прежняя формула 2 × цель.
+    Порядок: хаб настроек → ``~/.hermes/idle_compact_test.json`` (поле
+    ``gate_fraction``) → ``plugins.idle_compact.gate_fraction`` в config.yaml.
+    Ноль/нет — работает прежняя формула 2 × цель.
     """
+    hub = _hub_auto_ratio()
+    if hub > 0:
+        return hub
     test = _test_settings()
     for src in (test.get("gate_fraction"), _plugin_cfg().get("gate_fraction")):
         try:
@@ -1191,9 +1227,21 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.9.12 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        "idle-compact 0.9.13 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         DRY_RUN, WRITE_ENABLED,
     )
+    try:
+        import yaml
+        with open(str(_home() / "config.yaml"), "r", encoding="utf-8") as fh:
+            _eng = ((yaml.safe_load(fh) or {}).get("context") or {}).get("engine", "")
+        if str(_eng or "").strip().lower() not in ("idle_warm", "idle-warm"):
+            logger.warning(
+                "idle-compact: context.engine=%r — фон жмёт холодным aux без кеша; "
+                "для тёплых саммари: hermes config set context.engine idle_warm",
+                _eng or "compressor",
+            )
+    except Exception:
+        pass
     try:
         _boot_async()
     except Exception:
