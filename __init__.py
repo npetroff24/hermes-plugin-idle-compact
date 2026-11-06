@@ -89,7 +89,7 @@ def _test_settings() -> dict:
 GATE_K = 2.0          # сжимаем только если контекст >= 2x цели сжатия
 THRESHOLD_TOKENS = 500_000   # запасной порог, если конфиг нечитаем
 TARGET_RATIO = 0.2           # сверено: tokens_after ~0.2 x threshold
-HUMAN_SOURCES = {"telegram", "desktop", "cli", "tui", "messaging", "local"}
+HUMAN_SOURCES = {"telegram", "desktop", "cli", "tui", "messaging", "local", "discord"}
 
 _HERMES_HOME_FALLBACK = Path.home() / ".hermes"
 
@@ -329,7 +329,7 @@ def scan_candidates() -> list[dict]:
         cur = con.execute(
             "SELECT id, source, model, message_count, last_activity_at "
             "FROM sessions WHERE archived = 0 AND ended_at IS NULL "
-            "AND source IN ('telegram','desktop','cli','tui','messaging','local') "
+            "AND source IN ('telegram','desktop','cli','tui','messaging','local','discord') "
             "ORDER BY last_activity_at DESC LIMIT 50"
         )
         rows = [dict(r) for r in cur.fetchall()]
