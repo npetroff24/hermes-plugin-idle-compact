@@ -243,6 +243,26 @@ def _ttl_for_model(model: str) -> int:
     return ttl_for_model(model)
 
 
+def _evict_ttl() -> float:
+    """TTL выселения агента из кеша gateway: config agent.agent_cache.idle_ttl_secs.
+
+    Дефолт ядра — 3600 с (``_AGENT_CACHE_IDLE_TTL_SECS`` в gateway/run.py).
+    Плагин агента только подглядывает, поэтому таймер обязан срабатывать
+    раньше выселения — иначе «agent evicted/absent» и скип.
+    """
+    try:
+        import yaml
+        with open(str(_home() / "config.yaml"), "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        sec = ((cfg.get("agent") or {}).get("agent_cache") or {}) if isinstance(cfg, dict) else {}
+        val = float(sec.get("idle_ttl_secs") or 0)
+        if val > 0:
+            return val
+    except Exception:
+        pass
+    return 3600.0
+
+
 def _delay_for_model(model: str) -> float:
     test = _test_settings()
     if test.get("seconds"):
@@ -250,10 +270,11 @@ def _delay_for_model(model: str) -> float:
             return float(test["seconds"])
         except Exception:
             pass
-    # Задержка = TTL модели x 0.9: сжатие идёт пока кеш ещё жив.
+    # Задержка = min(TTL модели, TTL выселения агента) x 0.9: сжатие идёт
+    # пока живы И провайдерский кеш, И агент в памяти gateway.
     # Карта TTL нужна также для вердикта «был бы кеш тёплым»
     # и отсечки устаревших дедлайнов.
-    return float(_ttl_for_model(model)) * TTL_FACTOR
+    return float(min(_ttl_for_model(model), _evict_ttl())) * TTL_FACTOR
 
 
 def _rough_tokens(session_id: str) -> int:

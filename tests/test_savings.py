@@ -175,7 +175,7 @@ class TestComputeSaving(unittest.TestCase):
         self.assertIn("холодный", verdict)
 
     def test_ttl_for_models(self):
-        self.assertEqual(savings.ttl_seconds("deepseek-v4.1-flash"), 3300)  # 55 мин: раньше выселения агента (3600с)
+        self.assertEqual(savings.ttl_seconds("deepseek-v4.1-flash"), 5100)  # честный TTL провайдера; планировщик режет по выселению отдельно
         self.assertEqual(savings.ttl_seconds("muse-spark-1.3-contributor"), 600)
 
 
