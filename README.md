@@ -19,10 +19,9 @@ completely — your next turn re-reads the whole context at full price.
    pennies.
 3. **Timing per model.** Every model has its own cache TTL: DeepSeek ~85 min,
    Spark/GPT/Gemini ~10 min, Claude/Kimi/Qwen/MiniMax and the rest ~5 min.
-   Starts at 10% before expiry (TTL × 0.9). Note: Hermes itself evicts idle
-   agents from memory after 60 min (`agent.agent_cache.idle_ttl_secs`), so
-   the DeepSeek timer effectively fires at ~54 min — raise that setting to
-   use the full provider TTL.
+   Starts at 10% before expiry (TTL × 0.9). One caveat: Hermes evicts idle
+   chats after 60 min, so DeepSeek effectively fires at ~54 min
+   (see How it works).
 4. **Skips the small stuff.** The gate is a share of the model window
    (default 0.2, set it in the Plugins hub) — short chats are skipped,
    nothing wasted.
@@ -50,10 +49,18 @@ reasoning are unaffected.
 
 ## How it works
 
-1. After every turn — a TTL × 0.9 timer (live TTLs in `TTL_BY_MODEL_SUBSTR`:
-   deepseek 85 min provider TTL, but the agent is evicted after 60 min, so
-   effectively min(5100, 3600) × 0.9 = 3240 s; spark/gpt/gemini 10 min →
-   540 s, rest 5 min → 270 s).
+1. After every turn — a timer at 90% of cache lifetime: spark/gpt/gemini →
+   540 s, the rest → 270 s. DeepSeek cache lives 85 min, but Hermes evicts
+   the chat from memory after 60 min — so the timer fires at ~54 min.
+   To use the full lifetime, raise the limit with one config block:
+
+   ```yaml
+   agent:
+     agent_cache:
+       idle_ttl_secs: 5400
+   ```
+
+   The timer moves to ~76 min on its own, no code changes needed.
 2. On fire: session still quiet, human source, size above gate
    (gate = auto_compact_ratio × model window, default 0.2; overrides:
    Plugins-hub field, then `plugins.idle_compact.gate_fraction`, then
@@ -132,11 +139,9 @@ Compaction archives rows (`active=0`), never deletes.
    и попадает в prompt-cache на 96–98% вместо 0% — само сжатие стоит копейки.
 3. **Момент подбирает сам.** У каждой модели свой TTL кеша: DeepSeek ~85 мин,
    Spark/GPT/Gemini ~10 мин, Claude/Kimi/Qwen/MiniMax и остальные ~5 мин.
-   Старт за 10% до протухания (TTL × 0.9). Нюанс: сам Hermes выселяет
-   простаивающих агентов из памяти через 60 мин
-   (`agent.agent_cache.idle_ttl_secs`), поэтому таймер дипсика эффективно
-   срабатывает на ~54-й минуте — поднимите настройку, чтобы использовать
-   полный TTL провайдера.
+   Старт за 10% до протухания (TTL × 0.9). Нюанс: Hermes выгоняет чат
+   из памяти через 60 мин, поэтому дипсик срабатывает на 54-й минуте
+   (подробности — в Логике).
 4. **Мелочь не жмёт.** Порог — доля окна модели (дефолт 0.2, меняется
    в хабе плагинов) — короткие чаты пропускаются, ничего не тратится.
 5. **Деньги видны.** После каждого сжатия пишет SAVINGS: было → стало, цена;
@@ -163,11 +168,19 @@ tools и reasoning не ломаются.
 
 ## Логика
 
-1. После каждого хода — таймер TTL × 0.9 (боевые TTL по таблице
-   `TTL_BY_MODEL_SUBSTR`: у deepseek TTL провайдера 85 мин, но агент
-   выселяется через 60 мин, поэтому эффективно min(5100, 3600) × 0.9 =
-   3240 сек; spark/gpt/gemini 10 мин → 540 сек, остальные 5 мин →
-   270 сек).
+1. После каждого хода — таймер на 90% срока жизни кеша: spark/gpt/gemini →
+   540 сек, остальные → 270 сек. У дипсика кеш живёт 85 мин, но Hermes
+   выгоняет чат из памяти через 60 мин — поэтому таймер срабатывает
+   на 54-й минуте. Чтобы использовать полный срок, поднимите лимит
+   строкой в конфиге:
+
+   ```yaml
+   agent:
+     agent_cache:
+       idle_ttl_secs: 5400
+   ```
+
+   Таймер сам переедет на ~76 минут, код трогать не надо.
 2. Сработал: сессия тиха, источник human, размер > гейта
    (гейт = auto_compact_ratio × окно модели, дефолт 0.2; переопределения:
    поле в хабе плагинов, затем `plugins.idle_compact.gate_fraction`, затем

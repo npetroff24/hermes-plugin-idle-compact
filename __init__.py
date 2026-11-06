@@ -65,6 +65,9 @@ from .model_ttl import DEFAULT_TTL_SECONDS, TTL_BY_MODEL_SUBSTR, ttl_for_model
 
 TTL_FACTOR = 0.9
 
+# Модели, для которых уже жаловались на обрезку таймера выселением (один раз за процесс).
+_warned_evict_cap: set[str] = set()
+
 
 def _test_settings() -> dict:
     """Тестовый режим без правки кода: ~/.hermes/idle_compact_test.json.
@@ -274,7 +277,17 @@ def _delay_for_model(model: str) -> float:
     # пока живы И провайдерский кеш, И агент в памяти gateway.
     # Карта TTL нужна также для вердикта «был бы кеш тёплым»
     # и отсечки устаревших дедлайнов.
-    return float(min(_ttl_for_model(model), _evict_ttl())) * TTL_FACTOR
+    model_ttl = _ttl_for_model(model)
+    evict = _evict_ttl()
+    if model_ttl > evict and model not in _warned_evict_cap:
+        _warned_evict_cap.add(model)
+        logger.warning(
+            "idle-compact: %s: кеш живёт %dс, но Hermes выселяет агент "
+            "через %dс — таймер урезан до %dс. Поднимите "
+            "agent.agent_cache.idle_ttl_secs для полного TTL.",
+            model, model_ttl, int(evict), int(min(model_ttl, evict) * TTL_FACTOR),
+        )
+    return float(min(model_ttl, evict)) * TTL_FACTOR
 
 
 def _rough_tokens(session_id: str) -> int:

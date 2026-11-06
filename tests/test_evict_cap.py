@@ -49,6 +49,18 @@ class TestEvictCap(unittest.TestCase):
         mod = self._mod_with_config("agent: [unclosed\n")
         self.assertEqual(mod._evict_ttl(), 3600.0)
 
+    def test_evict_cap_warns_once(self):
+        mod = self._mod_with_config("compression:\n  threshold_tokens: 100000\n")
+        with self.assertLogs("ic_under_test", level="WARNING") as logs:
+            mod._delay_for_model("deepseek-v4.1-flash")
+        self.assertTrue(
+            any("idle_ttl_secs" in line for line in logs.output),
+            logs.output,
+        )
+        # Второй вызов молчит — подсказка одноразовая.
+        with self.assertNoLogs("ic_under_test", level="WARNING"):
+            mod._delay_for_model("deepseek-v4.1-flash")
+
 
 if __name__ == "__main__":
     unittest.main()
