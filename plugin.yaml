@@ -1,9 +1,10 @@
 name: idle-compact
-version: 0.9.15
+version: 0.9.16
 description: "Фоновое сжатие простаивающих сессий до истечения prompt-cache (beta)."
 author: "custom"
 kind: standalone
 provides_hooks: ["on_session_end", "post_api_request", "pre_api_request"]
+provides_middleware: ["llm_execution"]
 config_schema:
   auto_compact_ratio:
     type: float
