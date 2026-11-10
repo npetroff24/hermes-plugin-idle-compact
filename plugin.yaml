@@ -1,13 +1,14 @@
 name: idle-compact
-version: 0.9.16
-description: "Фоновое сжатие простаивающих сессий до истечения prompt-cache (beta)."
+version: 0.9.17
+description: "Background compression of idle sessions before prompt-cache expiry (beta)."
 author: "custom"
 kind: standalone
 provides_hooks: ["on_session_end", "post_api_request", "pre_api_request"]
 provides_middleware: ["llm_execution"]
+python_dependencies: ["pyyaml"]
 config_schema:
   auto_compact_ratio:
     type: float
     default: 0.2
-    label: "Порог автосжатия (доля окна модели)"
-    description: "Фоновое сжатие стартует на простое, когда контекст больше этой доли окна модели. 0.2 при пороге ядра 0.5 — раньше штатного сжатия, пока жив prompt-cache."
+    label: "Auto-compact threshold (fraction of model window)"
+    description: "Idle background compression starts when context exceeds this fraction of the model window. 0.2 vs core threshold 0.5 — earlier than stock compression, while prompt-cache is alive."

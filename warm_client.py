@@ -55,7 +55,6 @@ def _conversation_session_key(
 def _headers(api_key: str, api_mode: str, base_url: str, session_key: str | None = None) -> dict[str, str]:
     h = {
         "Content-Type": "application/json",
-        "User-Agent": "HermesAgent/0.22.5",
     }
     if api_mode == "anthropic_messages":
         h["x-api-key"] = api_key
@@ -177,14 +176,6 @@ def request_summary(
     body = build_payload(captured, prompt, api_mode, max_tokens)
     url = _url(base_url, api_mode)
     data = json.dumps(body).encode()
-    # Отладочный дамп отправленного warm-тела: без него не видно, почему
-    # провайдер не находит кеш (вход 61k при захваченных 42k).
-    try:
-        from pathlib import Path as _P
-        _dump = _P.home() / ".hermes" / f"idle_warm_body_{api_mode}.json"
-        _dump.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
     session_key = _conversation_session_key(provider, base_url, session_id)
     try:
         logger.info(
