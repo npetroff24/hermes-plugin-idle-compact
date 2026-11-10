@@ -12,11 +12,11 @@ completely — your next turn re-reads the whole context at full price.
 
 ## Advantages
 
-1. **Zero waiting.** Compacts ahead of time, while idle — you come back to an
-   already-slim chat. No waiting on compaction, ever.
+1. **No waiting when it finishes idle.** Compacts ahead of time, while idle —
+   if compaction completes before you return, the next message never waits for it.
 2. **Cache-warm, not cache-blind.** The summary request repeats your last turn
-   and hits prompt-cache at 96–98% instead of 0% — the compaction itself costs
-   pennies.
+   and hits prompt-cache at 92.6–97.5% in three measurements instead of ~0% —
+   the compaction itself costs pennies.
 3. **Timing per model.** Every model has its own cache TTL: DeepSeek ~85 min,
    Spark/GPT/Gemini ~10 min, Claude/Kimi/Qwen/MiniMax and the rest ~5 min.
    Starts at 10% before expiry (TTL × 0.9). One caveat: Hermes evicts idle
@@ -33,8 +33,8 @@ completely — your next turn re-reads the whole context at full price.
 7. **Windows and Linux.** One codebase: locks via `msvcrt`/`fcntl`, paths via
    `%LOCALAPPDATA%`/`~/.hermes`.
 
-Bottom line: smaller context — cheaper every answer, zero waiting, every
-number in the log.
+Bottom line: smaller context — cheaper every answer, no waiting when idle
+compaction finishes in time, every number in the log.
 
 ## Warm-path measurements (2026-10-29, opencode-go, live requests)
 
@@ -111,7 +111,8 @@ Lean is the core default tail mode; nothing to configure.
 ```bash
 hermes config set context.engine compressor
 hermes plugins disable idle-compact
-rm ~/.hermes/idle_compact_pending.json ~/.hermes/idle_capture_*.json ~/.hermes/idle_warm_body_*.json
+# one-time cleanup of leftover state from ≤0.9.17
+rm ~/.hermes/idle_compact_pending.json ~/.hermes/idle_*.json
 ```
 
 Compaction archives rows (`active=0`), never deletes.
@@ -133,10 +134,10 @@ Compaction archives rows (`active=0`), never deletes.
 
 ## Преимущества
 
-1. **Ноль ожидания.** Сжимает заранее, в простое — возвращаетесь, чат уже
-   ужатый. Ждать сжатия не приходится вообще.
+1. **Ноль ожидания, если успело.** Сжимает заранее, в простое — если сжатие
+   завершилось до вашего возвращения, ждать его не придётся.
 2. **Сжатие по кешу, а не мимо.** Запрос суммирования повторяет последний ход
-   и попадает в prompt-cache на 96–98% вместо 0% — само сжатие стоит копейки.
+   и попадает в prompt-cache на 92.6–97.5% в трёх замерах вместо ~0% — само сжатие стоит копейки.
 3. **Момент подбирает сам.** У каждой модели свой TTL кеша: DeepSeek ~85 мин,
    Spark/GPT/Gemini ~10 мин, Claude/Kimi/Qwen/MiniMax и остальные ~5 мин.
    Старт за 10% до протухания (TTL × 0.9). Нюанс: Hermes выгоняет чат
@@ -152,7 +153,7 @@ Compaction archives rows (`active=0`), never deletes.
 7. **Windows и Linux.** Один код: лок через `msvcrt`/`fcntl`, пути через
    `%LOCALAPPDATA%`/`~/.hermes`.
 
-Итого: меньше контекст — дешевле каждый ответ, ноль ожидания сжатия, каждая
+Итого: меньше контекст — дешевле каждый ответ, без ожидания, если сжатие успело на простое, каждая
 цифра в логе.
 
 ## Замеры warm-пути (29.10.2026, opencode-go, живые запросы)
@@ -230,7 +231,8 @@ hermes config set plugins.idle_compact.gate_fraction 0.3
 ```bash
 hermes config set context.engine compressor
 hermes plugins disable idle-compact
-rm ~/.hermes/idle_compact_pending.json ~/.hermes/idle_capture_*.json ~/.hermes/idle_warm_body_*.json
+# разовая чистка остатков от версий ≤0.9.17
+rm ~/.hermes/idle_compact_pending.json ~/.hermes/idle_*.json
 ```
 
 Сжатие архивирует строки (`active=0`), не удаляет.
