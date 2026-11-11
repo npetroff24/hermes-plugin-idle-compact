@@ -117,6 +117,16 @@ rm ~/.hermes/idle_compact_pending.json ~/.hermes/idle_*.json
 
 Compaction archives rows (`active=0`), never deletes.
 
+## Disclosures
+
+- Network: the warm summary request goes straight to the same model
+  provider/backend the session already uses. No third-party services.
+- Reads: session database (state, usage counters) and the in-flight LLM
+  request body (via the `llm_execution` middleware) to reuse its prefix.
+- Background work: per-session timers plus a ~60s daemon sweep thread;
+  state lives in `~/.hermes/idle_compact_pending.json` and `idle_*.json`.
+- No credentials read or stored. No telemetry or usage reporting.
+
 ---
 
 # idle-compact (на русском)
