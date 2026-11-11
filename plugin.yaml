@@ -1,5 +1,5 @@
 name: idle-compact
-version: 0.9.18
+version: 0.9.19
 description: "Background compression of idle sessions before prompt-cache expiry (beta)."
 author: "custom"
 kind: standalone
@@ -11,4 +11,4 @@ config_schema:
     type: float
     default: 0.2
     label: "Auto-compact threshold (fraction of model window)"
-    description: "Idle background compression starts when context exceeds this fraction of the model window. 0.2 vs core threshold 0.5 — earlier than stock compression, while prompt-cache is alive."
+    description: "Share of the model window that triggers background compression (0.2 = 20%). Lower = earlier and more often. Applies after Save; if empty, the gate is twice the core compression target."

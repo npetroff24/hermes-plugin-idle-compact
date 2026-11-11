@@ -61,10 +61,9 @@ reasoning are unaffected.
    ```
 
    The timer moves to ~76 min on its own, no code changes needed.
-2. On fire: session still quiet, human source, size above gate
-   (gate = auto_compact_ratio × model window, default 0.2; overrides:
-   Plugins-hub field, then `plugins.idle_compact.gate_fraction`, then
-   2 × live `threshold_tokens × target_ratio`).
+2. On fire: session still quiet, human source, size above gate.
+   The gate is your saved threshold (a share of the model window),
+   or twice the core compression target when nothing is saved.
 3. The plugin grabs the last real request (`pre_api_request` hook) and enables
    the warm path on its own context engine.
 4. The core does the compaction (`resident._compress_context`): locks,
@@ -96,13 +95,20 @@ hermes plugins install <git-url> --enable
 hermes config set context.engine idle_warm
 ```
 
-Optional: auto-compaction threshold as a share of the model window (default
-0.2 = twice the core target at stock 0.50/0.20) — also available as a field in
-the Desktop/TUI Plugins hub:
+That's it — no other setup needed. Without configuration the plugin
+compacts in the background once the context passes twice the core
+compression target.
+
+Optional: your own threshold as a share of the model window —
+0.2 means "compact past 20% of the window". Lower = earlier and
+more often. Set it in the Desktop/TUI Plugins hub
+(idle-compact → Auto-compact threshold → Save), or with one command:
 
 ```bash
-hermes config set plugins.idle_compact.gate_fraction 0.3
+hermes config set plugins.idle_compact.gate_fraction 0.2
 ```
+
+If set in both places, the hub value wins.
 
 Lean is the core default tail mode; nothing to configure.
 
@@ -195,10 +201,9 @@ tools и reasoning не ломаются.
    ```
 
    Таймер сам переедет на ~76 минут, код трогать не надо.
-2. Сработал: сессия тиха, источник human, размер > гейта
-   (гейт = auto_compact_ratio × окно модели, дефолт 0.2; переопределения:
-   поле в хабе плагинов, затем `plugins.idle_compact.gate_fraction`, затем
-   2 × живой `threshold_tokens × target_ratio`).
+2. Сработал: сессия тиха, источник human, размер > гейта.
+   Гейт — сохранённый порог (доля окна модели) либо две цели
+   сжатия ядра, если ничего не сохранено.
 3. Плагин захватывает последний реальный запрос (хук `pre_api_request`) и
    включает warm-путь на своём контекст-движке.
 4. Сжатие делает ядро (`resident._compress_context`): локи, cooldown,
@@ -230,12 +235,19 @@ hermes plugins install <git-url> --enable
 hermes config set context.engine idle_warm
 ```
 
-Опционально: порог автосжатия как доля окна модели (дефолт 0.2 = две цели
-при стоковых 0.50/0.20) — есть и полем в хабе плагинов Desktop/TUI:
+Всё — больше ничего настраивать не надо. Без конфигурации плагин
+жмёт в фоне, когда контекст переваливает за две цели сжатия ядра.
+
+Опционально: свой порог как доля окна модели — 0.2 означает
+«жать после 20% окна». Меньше число — раньше и чаще. Задаётся
+в хабе плагинов Desktop/TUI (idle-compact → Auto-compact
+threshold → Сохранить) либо одной командой:
 
 ```bash
-hermes config set plugins.idle_compact.gate_fraction 0.3
+hermes config set plugins.idle_compact.gate_fraction 0.2
 ```
+
+Если задано и там, и там — побеждает хаб.
 
 Хвост lean — дефолт ядра, настраивать нечего.
 

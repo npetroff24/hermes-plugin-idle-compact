@@ -70,7 +70,7 @@ _warned_evict_cap: set[str] = set()
 
 
 def _test_settings() -> dict:
-    """Тестовый режим без правки кода: ~/.hermes/idle_compact_test.json.
+    """Тестовый режим без правки кода: <HERMES_HOME>/idle_compact_test.json.
 
     {"seconds": 300, "gate": 20000} — таймер и гейт для быстрой проверки.
     Файла нет — обычный режим.
@@ -206,7 +206,7 @@ def _hub_auto_ratio() -> float:
 def _gate_fraction() -> float:
     """Доля окна модели, после которой включается фоновое сжатие.
 
-    Порядок: хаб настроек → ``~/.hermes/idle_compact_test.json`` (поле
+    Порядок: хаб настроек → ``<HERMES_HOME>/idle_compact_test.json`` (поле
     ``gate_fraction``) → ``plugins.idle_compact.gate_fraction`` в config.yaml.
     Ноль/нет — работает прежняя формула 2 × цель.
     """
