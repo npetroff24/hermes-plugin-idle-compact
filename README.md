@@ -123,9 +123,12 @@ Compaction archives rows (`active=0`), never deletes.
   provider/backend the session already uses. No third-party services.
 - Reads: session database (state, usage counters) and the in-flight LLM
   request body (via the `llm_execution` middleware) to reuse its prefix.
-- Background work: per-session timers plus a ~60s daemon sweep thread;
-  state lives in `~/.hermes/idle_compact_pending.json` and `idle_*.json`.
-- No credentials read or stored. No telemetry or usage reporting.
+- Credentials: reads the agent's API key in-process for the warm call;
+  never stored, logged, or sent anywhere except the session's own provider.
+- Background work: per-session timers plus a ~30s daemon sweep thread;
+  state lives in `idle_compact_pending.json` and `idle_*.json` under the
+  Hermes home directory (`%LOCALAPPDATA%\hermes` on Windows, `~/.hermes` elsewhere).
+- No telemetry or usage reporting.
 
 ---
 
