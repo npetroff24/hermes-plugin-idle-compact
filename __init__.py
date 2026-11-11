@@ -69,11 +69,13 @@ TTL_FACTOR = 0.9
 _warned_evict_cap: set[str] = set()
 
 
-def _test_settings() -> dict:
+def _test_settings(session_id: str | None = None) -> dict:
     """Тестовый режим без правки кода: <HERMES_HOME>/idle_compact_test.json.
 
     {"seconds": 300, "gate": 20000} — таймер и гейт для быстрой проверки.
-    Файла нет — обычный режим.
+    Поле "session" ограничивает режим одной сессией (префикс ID):
+    {"seconds": 10, "gate": 150000, "session": "local-c11b24"} — остальные
+    сессии работают штатно. Файла нет — обычный режим.
     """
     try:
         import json
@@ -82,7 +84,14 @@ def _test_settings() -> dict:
         if not path.exists():
             return {}
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        want = str(data.get("session") or "").strip()
+        if want:
+            have = str(session_id or "")
+            if not have or not have.startswith(want):
+                return {}
+        return data
     except Exception:
         logger.debug("idle-compact: test settings read failed", exc_info=True)
         return {}
@@ -203,7 +212,7 @@ def _hub_auto_ratio() -> float:
     return 0.0
 
 
-def _gate_fraction() -> float:
+def _gate_fraction(session_id: str | None = None) -> float:
     """Доля окна модели, после которой включается фоновое сжатие.
 
     Порядок: хаб настроек → ``<HERMES_HOME>/idle_compact_test.json`` (поле
@@ -213,7 +222,7 @@ def _gate_fraction() -> float:
     hub = _hub_auto_ratio()
     if hub > 0:
         return hub
-    test = _test_settings()
+    test = _test_settings(session_id)
     for src in (test.get("gate_fraction"), _plugin_cfg().get("gate_fraction")):
         try:
             if src is not None and float(src) > 0:
@@ -223,14 +232,14 @@ def _gate_fraction() -> float:
     return 0.0
 
 
-def _live_gate(comp=None) -> int | None:
-    test = _test_settings()
+def _live_gate(comp=None, session_id: str | None = None) -> int | None:
+    test = _test_settings(session_id)
     if test.get("gate"):
         try:
             return int(test["gate"])
         except Exception:
             pass
-    frac = _gate_fraction()
+    frac = _gate_fraction(session_id)
     if frac > 0:
         window = int(getattr(comp, "context_length", 0) or 0)
         if window > 0:
@@ -266,8 +275,8 @@ def _evict_ttl() -> float:
     return 3600.0
 
 
-def _delay_for_model(model: str) -> float:
-    test = _test_settings()
+def _delay_for_model(model: str, session_id: str | None = None) -> float:
+    test = _test_settings(session_id)
     if test.get("seconds"):
         try:
             return float(test["seconds"])
@@ -622,7 +631,7 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
         route_live = ""
         if res is not None:
             agent_live, comp, route_live = res
-            floor = _gate_floor(comp)
+            floor = _gate_floor(comp, session_id)
             if floor is not None:
                 # Реальный размер последнего промпта из usage API: оценка по
                 # символам занижает в 2–3 раза (JSON, tool_calls, system prompt).
@@ -630,7 +639,7 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
                 est = _estimate_history(comp, session_id)
                 exact = max(api_size, est or 0) or None
         if floor is None:
-            gate = _live_gate(comp)
+            gate = _live_gate(comp, session_id)
             if gate is None:
                 logger.info("idle-compact: session %s no live gate, skip", session_id)
                 return
@@ -700,7 +709,7 @@ def _on_session_end(session_id: str = "", **kwargs) -> None:
         )
         return
     model = row.get("model") or ""
-    delay = _delay_for_model(model)
+    delay = _delay_for_model(model, session_id)
     stamp = time.time()
     try:
         from contextvars import copy_context
@@ -716,18 +725,18 @@ def _on_session_end(session_id: str = "", **kwargs) -> None:
         _timers[session_id] = t
         t.start()
     _remember(session_id, stamp + delay, stamp, model)
-    gate = _live_gate()
+    gate = _live_gate(session_id=session_id)
     logger.info(
         "idle-compact: timer %.0fs for session %s model %s (gate %s | test=%s ttl=%s)",
         delay, session_id, model, gate if gate is not None else "n/a",
-        _test_settings() or "-", _ttl_for_model(model),
+        _test_settings(session_id) or "-", _ttl_for_model(model),
     )
 
 
-def _gate_floor(compressor) -> int | None:
+def _gate_floor(compressor, session_id: str | None = None) -> int | None:
     """Пол из живого порога компрессора + anti-thrash. Нет данных — None (скип)."""
     # Тестовый режим: явный гейт из файла имеет приоритет.
-    test = _test_settings()
+    test = _test_settings(session_id)
     if test.get("gate"):
         try:
             return int(test["gate"])
@@ -741,7 +750,7 @@ def _gate_floor(compressor) -> int | None:
             target = int(thr * ratio)
     except Exception:
         target = None
-    frac = _gate_fraction()
+    frac = _gate_fraction(session_id)
     window_now = int(getattr(compressor, "context_length", 0) or 0)
     if frac > 0 and window_now > 0:
         # Порог от окна модели — приоритетнее цели и режима.
@@ -827,7 +836,7 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None, route:
         exact = int(estimate_messages_tokens_rough(messages))
     except Exception:
         exact = size
-    floor = _gate_floor(comp)
+    floor = _gate_floor(comp, session_id)
     if floor is None:
         logger.info("idle-compact: session %s no live floor, skip", session_id)
         return
@@ -971,7 +980,7 @@ def _restore_pending() -> None:
         # Дедлайн просрочен настолько, что кеш всё равно мёртв (реальный случай:
         # рестарт через 2.5 часа после дедлайна, сжатие ушло холодным).
         # Сжимать по такой метке бессмысленно — это сделает ядро при возврате.
-        ttl = _delay_for_model(model)
+        ttl = _delay_for_model(model, session_id)
         if now - deadline > max(ttl * 2, 3600):
             dropped += 1
             continue
@@ -1135,7 +1144,7 @@ def _sweep_due() -> int:
             stamp = float(entry.get("stamp") or 0)
             model = str(entry.get("model") or "")
             deadline = float(entry.get("deadline") or 0)
-            ttl = _delay_for_model(model)
+            ttl = _delay_for_model(model, sid)
             # Совсем старые дедлайны не трогаем: кеш давно мёртв, сожмёт ядро при возврате.
             if now - deadline > max(ttl * 2, 3600):
                 _forget(sid)

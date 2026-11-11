@@ -55,6 +55,9 @@ def _conversation_session_key(
 def _headers(api_key: str, api_mode: str, base_url: str, session_key: str | None = None) -> dict[str, str]:
     h = {
         "Content-Type": "application/json",
+        # Cloudflare перед релеем режет запросы с подписью Python-urllib
+        # (HTTP 403, error code 1010). Представляемся так же, как ядро.
+        "User-Agent": "python-httpx/0.28.1",
     }
     if api_mode == "anthropic_messages":
         h["x-api-key"] = api_key
