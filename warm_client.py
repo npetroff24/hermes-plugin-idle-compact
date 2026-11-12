@@ -28,6 +28,19 @@ logger = logging.getLogger(__name__)
 TIMEOUT = 300.0
 
 _UA_CACHE: str | None = None
+_SSL_CTX = None
+
+
+def _ssl_context():
+    """Системное хранилище сертификатов — одно на процесс.
+
+    `ssl.create_default_context()` на Windows перечисляет хранилище при каждом
+    вызове; warm-запросов мало, но контекст всё равно нет смысла пересоздавать.
+    """
+    global _SSL_CTX
+    if _SSL_CTX is None:
+        _SSL_CTX = ssl.create_default_context()
+    return _SSL_CTX
 
 
 def _user_agent() -> str:
@@ -220,7 +233,7 @@ def request_summary(
         with httpx.Client(
             timeout=TIMEOUT,
             follow_redirects=True,
-            verify=ssl.create_default_context(),
+            verify=_ssl_context(),
         ) as client:
             resp = client.post(url, content=data,
                                headers=_headers(api_key, api_mode, base_url, session_key))

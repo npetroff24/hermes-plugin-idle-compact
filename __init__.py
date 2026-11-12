@@ -579,7 +579,6 @@ def _resident_desktop(session_id: str):
 _warned_resident: set[str] = set()
 _last_warm_usage: dict | None = None
 _history_db = None
-_PLUGIN_CTX = None  # ctx из register(): нужен для диагностического вызова ctx.llm
 
 
 def _resident_reason(session_id: str, reason: str) -> None:
@@ -603,7 +602,9 @@ def _history_getter(comp):
     try:
         if _history_db is None:
             from hermes_state import SessionDB
-            _history_db = SessionDB(Path(_state_db()), read_only=True)
+            # Без явного пути: SessionDB сам берёт DEFAULT_DB_PATH и учитывает
+            # переопределения (--db, профили), иначе читаем чужую базу.
+            _history_db = SessionDB(read_only=True)
         fn = getattr(_history_db, "get_messages_as_conversation", None)
         if callable(fn):
             return fn
@@ -614,36 +615,6 @@ def _history_getter(comp):
     return fn if callable(fn) else None
 
 
-def _probe_ctx_llm(session_id: str, captured) -> None:
-    """Диагностика: сколько кеша даёт вызов через ctx.llm с тем же разговором.
-
-    ``ctx.llm.complete`` принимает только messages — ни tools, ни instructions,
-    ни cache key захваченного запроса он повторить не может. Замер показывает
-    цену этой потери; включается полем ``"probe_llm": true`` в тестовом json.
-    """
-    if _PLUGIN_CTX is None or not isinstance(captured, dict):
-        return
-    body = captured.get("body") if isinstance(captured.get("body"), dict) else captured
-    msgs = body.get("messages")
-    if not isinstance(msgs, list) or not msgs:
-        msgs = body.get("input")
-    if not isinstance(msgs, list) or not msgs:
-        logger.info("idle-compact PROBE ctx.llm: в захвате нет messages, пропуск")
-        return
-    try:
-        res = _PLUGIN_CTX.llm.complete(
-            msgs, timeout=120, purpose="idle-compact ctx.llm cache probe",
-        )
-        u = getattr(res, "usage", None)
-        logger.info(
-            "idle-compact PROBE ctx.llm: cache_read=%s input=%s out=%s model=%s",
-            getattr(u, "cache_read_tokens", None), getattr(u, "input_tokens", None),
-            getattr(u, "output_tokens", None), getattr(res, "model", ""),
-        )
-    except Exception as exc:
-        logger.warning("idle-compact PROBE ctx.llm failed: %s", exc)
-
-
 def _estimate_history(comp, session_id: str) -> int | None:
     """Точная оценка ядра по истории из БД. None — не вышло."""
     try:
@@ -651,6 +622,12 @@ def _estimate_history(comp, session_id: str) -> int | None:
         if not callable(get_conv):
             return None
         history = get_conv(session_id)
+        if not history:
+            # Публичное чтение вернуло пусто (другая БД/профиль) — падаем на
+            # приватный handle компрессора, чтобы не скипать сессию молча.
+            fb = getattr(getattr(comp, "_session_db", None), "get_messages_as_conversation", None)
+            if callable(fb):
+                history = fb(session_id)
         messages = [m for m in history if m.get("role") in {"user", "assistant", "tool"}]
         from agent.model_metadata import estimate_messages_tokens_rough
         return int(estimate_messages_tokens_rough(messages))
@@ -885,13 +862,16 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None,
     except Exception:
         logger.info("idle-compact: session %s cooldown check failed, skip", session_id)
         return
-    db = None
     get_conv = _history_getter(comp)
     if not callable(get_conv):
         logger.info("idle-compact: no db handle on compressor, skip %s", session_id)
         return
     try:
         history = get_conv(session_id)
+        if not history:
+            fb = getattr(getattr(comp, "_session_db", None), "get_messages_as_conversation", None)
+            if callable(fb):
+                history = fb(session_id)
     except Exception:
         logger.exception("idle-compact: history load failed")
         return
@@ -919,20 +899,20 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None,
     except Exception:
         logger.exception("idle-compact: savings begin failed")
 
+    did_compress = False
+
     def work() -> None:
+        nonlocal did_compress
         try:
             fence = None
             try:
                 from agent.conversation_compression import CompressionCommitFence
                 fence = CompressionCommitFence()
             except Exception:
-                # Fail-closed: без fence коммит сжатия не защищён от гонки с
-                # живым ходом. Лучше не сжимать, чем сжать поверх ответа.
-                logger.warning(
-                    "idle-compact: нет CompressionCommitFence — сжатие отложено для %s",
-                    session_id,
-                )
-                return
+                # Ядро само создаёт fence, если плагин его не передал
+                # (agent/compression_facade.py): без него сжатие всё равно
+                # защищено, поэтому здесь не отказываемся от работы.
+                fence = None
             kwargs: dict = {"approx_tokens": exact, "task_id": session_id,
                             "trigger": "idle_background"}
             if fence is not None:
@@ -943,8 +923,6 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None,
                 engine = getattr(agent, "context_compressor", None)
                 warm_on = False
                 cfg = _capture_for(session_id)
-                if _test_settings(session_id).get("probe_llm"):
-                    _probe_ctx_llm(session_id, (cfg or {}).get("body"))
                 if engine is not None and hasattr(engine, "begin_warm"):
                     try:
                         engine.begin_warm(
@@ -962,6 +940,7 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None,
                             logger.info("idle-compact: warm без захвата — сжатие пойдёт через aux")
                     except Exception:
                         logger.debug("idle-compact: begin_warm failed", exc_info=True)
+                did_compress = True
                 try:
                     try:
                         agent._compress_context(messages, "", **kwargs)
@@ -1012,18 +991,21 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None,
             except Exception:
                 pass
         finally:
-            # Возвращаем агента в кеш только если там лежит именно тот, кого
-            # мы сжали: иначе выкинем чужой свежий агент. Раньше runner здесь
-            # не был привязан на обычном пути — NameError, и evict не работал.
-            evict = getattr(runner, "_evict_cached_agent", None) if runner is not None else None
+            # Выселяем агента только если сжатие реально шло (иначе выкинем
+            # живой агент без причины) и только когда в кеше лежит тот же
+            # объект. Проверка неатомарна — это best-effort, как и в ядре;
+            # не смогли подтвердить совпадение — не трогаем.
+            if not did_compress or runner is None:
+                return
+            evict = getattr(runner, "_evict_cached_agent", None)
             if callable(evict):
                 try:
-                    same = True
+                    same = False
                     try:
                         from gateway.run import _cached_agent_for_hygiene
                         same = _cached_agent_for_hygiene(runner, route) is agent
                     except Exception:
-                        pass
+                        same = False
                     if same:
                         evict(route)
                 except Exception:
@@ -1289,8 +1271,6 @@ def _start_watchdog() -> None:
 
 def register(ctx) -> None:
     """Точка входа плагина: движок, хук конца хода и хук захвата запроса."""
-    global _PLUGIN_CTX
-    _PLUGIN_CTX = ctx
     # Свой контекст-движок: штатный компрессор + warm-путь суммирования.
     # Если не удастся зарегистрировать — плагин продолжит работать как раньше (aux-путь).
     global _WARM_ENGINE
