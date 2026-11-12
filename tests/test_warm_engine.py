@@ -10,7 +10,8 @@ from pathlib import Path
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_DIR))
-sys.path.insert(0, "/usr/local/lib/hermes-agent")
+
+from _bootstrap import AGENT_HOME  # noqa: E402,F401  (кладёт исходники ядра в sys.path)
 
 
 def _load():

@@ -10,6 +10,8 @@ from pathlib import Path
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_DIR))
 
+from _bootstrap import AGENT_HOME  # noqa: E402,F401  (кладёт исходники ядра в sys.path)
+
 _spec = importlib.util.spec_from_file_location("wc_under_test", PLUGIN_DIR / "warm_client.py")
 assert _spec is not None and _spec.loader is not None
 wc = importlib.util.module_from_spec(_spec)
@@ -141,7 +143,6 @@ class TestAffinityHeader(unittest.TestCase):
 
     def test_conversation_key_matches_session(self):
         """Ключ разговора совпадает с session_id (нормализация — тождество)."""
-        sys.path.insert(0, "/usr/local/lib/hermes-agent")
         key = wc._conversation_session_key(
             "opencode-go", "https://opencode.ai/zen/go/v1", "20261027_054524_0c574947")
         self.assertEqual(key, "20261027_054524_0c574947")
@@ -154,7 +155,6 @@ class TestAffinityHeader(unittest.TestCase):
 class TestEngineSignature(unittest.TestCase):
     def test_signature_matches_kernel(self):
         """Если ядро сменит сигнатуру _call_summary_llm — warm должен отключиться, а не падать."""
-        sys.path.insert(0, "/usr/local/lib/hermes-agent")
         spec = importlib.util.spec_from_file_location("we_under_test", PLUGIN_DIR / "warm_engine.py")
         assert spec is not None and spec.loader is not None
         we = importlib.util.module_from_spec(spec)

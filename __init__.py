@@ -471,16 +471,20 @@ def _forget(session_id: str) -> None:
 
 
 def _resident(session_id: str):
-    """(agent, compressor, route) живой сессии или None. Только чтение.
+    """(agent, compressor, route, runner) живой сессии или None. Только чтение.
 
     Причину отсутствия пишем в лог (один раз за сессию): без неё диагностика
     «api_size=n/a» бесполезна — непонятно, нет runner, нет ключа или нет агента.
+
+    ``runner`` возвращаем наружу: он нужен вызывающему, чтобы после сжатия
+    вернуть агента в кеш. Раньше он терялся и eviction на обычном пути падал.
     """
     try:
-        from gateway.run import _gateway_runner_ref, _cached_agent_for_hygiene
+        from gateway.run import _gateway_runner_ref
     except Exception as exc:
         _resident_reason(session_id, f"gateway import failed: {type(exc).__name__}")
         return None
+    runner = None
     try:
         runner = _gateway_runner_ref()
     except Exception as exc:
@@ -498,6 +502,11 @@ def _resident(session_id: str):
         _resident_reason(session_id, "session has no session_key in db")
         return None
     try:
+        from gateway.run import _cached_agent_for_hygiene
+    except Exception as exc:
+        _resident_reason(session_id, f"cache lookup import failed: {type(exc).__name__}")
+        return None
+    try:
         agent = _cached_agent_for_hygiene(runner, route)
     except Exception as exc:
         _resident_reason(session_id, f"cache lookup failed: {type(exc).__name__}")
@@ -512,7 +521,7 @@ def _resident(session_id: str):
     if comp is None:
         _resident_reason(session_id, "agent has no context_compressor")
         return None
-    return agent, comp, route
+    return agent, comp, route, runner
 
 
 def _resident_desktop(session_id: str):
@@ -559,7 +568,7 @@ def _resident_desktop(session_id: str):
                     f"{sum(1 for a in dir(agent) if 'compress' in a.lower())} similar attrs)",
                 )
                 return None
-            return agent, comp, str(sess.get("session_key") or session_id)
+            return agent, comp, str(sess.get("session_key") or session_id), None
     _resident_reason(
         session_id,
         f"desktop registry has no match (keys: {[str(k)[:10] for k in list(sessions)[:5]]})",
@@ -569,6 +578,7 @@ def _resident_desktop(session_id: str):
 
 _warned_resident: set[str] = set()
 _last_warm_usage: dict | None = None
+_history_db = None
 
 
 def _resident_reason(session_id: str, reason: str) -> None:
@@ -581,11 +591,32 @@ def _resident_reason(session_id: str, reason: str) -> None:
     logger.info("idle-compact: нет живого агента для %s — %s", session_id, reason)
 
 
+def _history_getter(comp):
+    """Функция ``(session_id) -> messages``: публичный SessionDB, иначе приватный.
+
+    Публичный ``hermes_state.SessionDB(read_only=True)`` — стабильный API;
+    приватный ``comp._session_db`` оставляем запасным путём для сборок, где
+    публичного чтения ещё нет.
+    """
+    global _history_db
+    try:
+        if _history_db is None:
+            from hermes_state import SessionDB
+            _history_db = SessionDB(Path(_state_db()), read_only=True)
+        fn = getattr(_history_db, "get_messages_as_conversation", None)
+        if callable(fn):
+            return fn
+    except Exception:
+        pass
+    db = getattr(comp, "_session_db", None)
+    fn = getattr(db, "get_messages_as_conversation", None)
+    return fn if callable(fn) else None
+
+
 def _estimate_history(comp, session_id: str) -> int | None:
     """Точная оценка ядра по истории из БД. None — не вышло."""
     try:
-        db = getattr(comp, "_session_db", None)
-        get_conv = getattr(db, "get_messages_as_conversation", None)
+        get_conv = _history_getter(comp)
         if not callable(get_conv):
             return None
         history = get_conv(session_id)
@@ -629,8 +660,9 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
         res = _resident(session_id)
         agent_live = None
         route_live = ""
+        runner_live = None
         if res is not None:
-            agent_live, comp, route_live = res
+            agent_live, comp, route_live, runner_live = res
             floor = _gate_floor(comp, session_id)
             if floor is not None:
                 # Реальный размер последнего промпта из usage API: оценка по
@@ -664,7 +696,8 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
             return
         # -- боевое сжатие: allowlist как опциональный ограничитель --
         if WRITE_ENABLED and (not ALLOWLIST or session_id in ALLOWLIST):
-            _do_compress(session_id, model, size, ctx, agent=agent_live, route=route_live)
+            _do_compress(session_id, model, size, ctx, agent=agent_live,
+                         route=route_live, runner=runner_live)
             return
         logger.info("idle-compact: write path not yet enabled, skip %s", session_id)
     except Exception:
@@ -768,7 +801,8 @@ def _gate_floor(compressor, session_id: str | None = None) -> int | None:
     return floor
 
 
-def _do_compress(session_id: str, model: str, size: int, ctx, agent=None, route: str = "") -> None:
+def _do_compress(session_id: str, model: str, size: int, ctx, agent=None,
+                 route: str = "", runner=None) -> None:
     """Боевое сжатие через resident-агента: весь коммит делает ядро.
 
     ``agent`` приходит из ``_resident`` — он уже нашёл живого агента (в том
@@ -820,8 +854,8 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None, route:
     except Exception:
         logger.info("idle-compact: session %s cooldown check failed, skip", session_id)
         return
-    db = getattr(comp, "_session_db", None)
-    get_conv = getattr(db, "get_messages_as_conversation", None)
+    db = None
+    get_conv = _history_getter(comp)
     if not callable(get_conv):
         logger.info("idle-compact: no db handle on compressor, skip %s", session_id)
         return
@@ -861,7 +895,13 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None, route:
                 from agent.conversation_compression import CompressionCommitFence
                 fence = CompressionCommitFence()
             except Exception:
-                fence = None
+                # Fail-closed: без fence коммит сжатия не защищён от гонки с
+                # живым ходом. Лучше не сжимать, чем сжать поверх ответа.
+                logger.warning(
+                    "idle-compact: нет CompressionCommitFence — сжатие отложено для %s",
+                    session_id,
+                )
+                return
             kwargs: dict = {"approx_tokens": exact, "task_id": session_id,
                             "trigger": "idle_background"}
             if fence is not None:
@@ -939,10 +979,20 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None, route:
             except Exception:
                 pass
         finally:
-            evict = getattr(runner, "_evict_cached_agent", None)
+            # Возвращаем агента в кеш только если там лежит именно тот, кого
+            # мы сжали: иначе выкинем чужой свежий агент. Раньше runner здесь
+            # не был привязан на обычном пути — NameError, и evict не работал.
+            evict = getattr(runner, "_evict_cached_agent", None) if runner is not None else None
             if callable(evict):
                 try:
-                    evict(route)
+                    same = True
+                    try:
+                        from gateway.run import _cached_agent_for_hygiene
+                        same = _cached_agent_for_hygiene(runner, route) is agent
+                    except Exception:
+                        pass
+                    if same:
+                        evict(route)
                 except Exception:
                     pass
 

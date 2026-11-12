@@ -24,7 +24,7 @@ class TestHubPrecedence(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         (Path(tmp.name) / "config.yaml").write_text(text, encoding="utf-8")
         mod._home = lambda: Path(tmp.name)  # type: ignore[attr-defined]
-        mod._test_settings = lambda: {}  # type: ignore[attr-defined]
+        mod._test_settings = lambda *a, **k: {}  # type: ignore[attr-defined]
         return mod
 
     def test_hub_wins_over_manual(self):

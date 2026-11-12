@@ -127,10 +127,10 @@ Compaction archives rows (`active=0`), never deletes.
 
 - Network: the warm summary request goes straight to the same model
   provider/backend the session already uses. No third-party services.
-- Transport: the warm request sends the same `User-Agent` as the core agent
-  (`python-httpx/...`). Relays behind Cloudflare reject the default
-  `Python-urllib` agent with `HTTP 403 error code 1010`, and the warm path
-  then falls back to the cold aux call.
+- Transport: the warm request goes through `httpx` and signs itself with
+  `idle-compact/<version>` from `plugin.yaml`. Relays behind Cloudflare reject
+  the default `Python-urllib` agent with `HTTP 403 error code 1010`, and the
+  warm path then falls back to the cold aux call.
 - Reads: session database (state, usage counters) and the in-flight LLM
   request body (via the `llm_execution` middleware) to reuse its prefix.
 - Credentials: reads the agent's API key in-process for the warm call;

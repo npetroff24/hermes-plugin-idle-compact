@@ -17,13 +17,40 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import ssl
-import urllib.error
-import urllib.request
+from pathlib import Path
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
 TIMEOUT = 300.0
+
+_UA_CACHE: str | None = None
+
+
+def _user_agent() -> str:
+    """Честная подпись клиента: ``idle-compact/<версия из plugin.yaml>``.
+
+    Cloudflare перед релеем отбивает ``Python-urllib`` (HTTP 403, error code
+    1010), поэтому подпись обязательна. Но подделываться под чужой клиент
+    нельзя: версия берётся из собственного манифеста и не устаревает вместе
+    с зависимостями.
+    """
+    global _UA_CACHE
+    if _UA_CACHE:
+        return _UA_CACHE
+    version = "0.0.0"
+    try:
+        text = (Path(__file__).resolve().parent / "plugin.yaml").read_text(encoding="utf-8")
+        m = re.search(r'(?m)^version:\s*["\']?([0-9][^"\'\s]*)', text)
+        if m:
+            version = m.group(1)
+    except Exception:
+        pass
+    _UA_CACHE = f"idle-compact/{version}"
+    return _UA_CACHE
 
 
 class WarmRefused(RuntimeError):
@@ -55,9 +82,7 @@ def _conversation_session_key(
 def _headers(api_key: str, api_mode: str, base_url: str, session_key: str | None = None) -> dict[str, str]:
     h = {
         "Content-Type": "application/json",
-        # Cloudflare перед релеем режет запросы с подписью Python-urllib
-        # (HTTP 403, error code 1010). Представляемся так же, как ядро.
-        "User-Agent": "python-httpx/0.28.1",
+        "User-Agent": _user_agent(),
     }
     if api_mode == "anthropic_messages":
         h["x-api-key"] = api_key
@@ -188,20 +213,22 @@ def request_summary(
         )
     except Exception:
         pass
-    req = urllib.request.Request(url, data=data, headers=_headers(api_key, api_mode, base_url, session_key), method="POST")
     try:
-        ctx = ssl.create_default_context()
-        with urllib.request.urlopen(req, timeout=TIMEOUT, context=ctx) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            detail = exc.read().decode("utf-8", "replace")[:300]
-        except Exception:
-            pass
-        raise WarmRefused(f"HTTP {exc.code}: {detail}") from exc
+        # httpx, а не urllib: UA ставим свой, таймаут явный (дефолт httpx —
+        # 5 с, живое сжатие длится дольше), редиректы как у urllib, доверие
+        # сертификатам — системное хранилище, как раньше.
+        with httpx.Client(
+            timeout=TIMEOUT,
+            follow_redirects=True,
+            verify=ssl.create_default_context(),
+        ) as client:
+            resp = client.post(url, content=data,
+                               headers=_headers(api_key, api_mode, base_url, session_key))
     except Exception as exc:
         raise WarmRefused(f"{type(exc).__name__}: {exc}") from exc
+    if resp.status_code >= 400:
+        raise WarmRefused(f"HTTP {resp.status_code}: {resp.text[:300]}")
+    raw = resp.content
 
     try:
         parsed = json.loads(raw)
