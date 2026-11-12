@@ -579,6 +579,7 @@ def _resident_desktop(session_id: str):
 _warned_resident: set[str] = set()
 _last_warm_usage: dict | None = None
 _history_db = None
+_PLUGIN_CTX = None  # ctx из register(): нужен для диагностического вызова ctx.llm
 
 
 def _resident_reason(session_id: str, reason: str) -> None:
@@ -611,6 +612,36 @@ def _history_getter(comp):
     db = getattr(comp, "_session_db", None)
     fn = getattr(db, "get_messages_as_conversation", None)
     return fn if callable(fn) else None
+
+
+def _probe_ctx_llm(session_id: str, captured) -> None:
+    """Диагностика: сколько кеша даёт вызов через ctx.llm с тем же разговором.
+
+    ``ctx.llm.complete`` принимает только messages — ни tools, ни instructions,
+    ни cache key захваченного запроса он повторить не может. Замер показывает
+    цену этой потери; включается полем ``"probe_llm": true`` в тестовом json.
+    """
+    if _PLUGIN_CTX is None or not isinstance(captured, dict):
+        return
+    body = captured.get("body") if isinstance(captured.get("body"), dict) else captured
+    msgs = body.get("messages")
+    if not isinstance(msgs, list) or not msgs:
+        msgs = body.get("input")
+    if not isinstance(msgs, list) or not msgs:
+        logger.info("idle-compact PROBE ctx.llm: в захвате нет messages, пропуск")
+        return
+    try:
+        res = _PLUGIN_CTX.llm.complete(
+            msgs, timeout=120, purpose="idle-compact ctx.llm cache probe",
+        )
+        u = getattr(res, "usage", None)
+        logger.info(
+            "idle-compact PROBE ctx.llm: cache_read=%s input=%s out=%s model=%s",
+            getattr(u, "cache_read_tokens", None), getattr(u, "input_tokens", None),
+            getattr(u, "output_tokens", None), getattr(res, "model", ""),
+        )
+    except Exception as exc:
+        logger.warning("idle-compact PROBE ctx.llm failed: %s", exc)
 
 
 def _estimate_history(comp, session_id: str) -> int | None:
@@ -912,6 +943,8 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None,
                 engine = getattr(agent, "context_compressor", None)
                 warm_on = False
                 cfg = _capture_for(session_id)
+                if _test_settings(session_id).get("probe_llm"):
+                    _probe_ctx_llm(session_id, (cfg or {}).get("body"))
                 if engine is not None and hasattr(engine, "begin_warm"):
                     try:
                         engine.begin_warm(
@@ -1256,6 +1289,8 @@ def _start_watchdog() -> None:
 
 def register(ctx) -> None:
     """Точка входа плагина: движок, хук конца хода и хук захвата запроса."""
+    global _PLUGIN_CTX
+    _PLUGIN_CTX = ctx
     # Свой контекст-движок: штатный компрессор + warm-путь суммирования.
     # Если не удастся зарегистрировать — плагин продолжит работать как раньше (aux-путь).
     global _WARM_ENGINE

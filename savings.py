@@ -417,11 +417,21 @@ def log_summary(session_id: str) -> None:
     s = session_summary(session_id)
     if not s:
         return
+    note = ""
+    try:
+        with _lock:
+            st = _state.get(session_id) or {}
+            if st.get("pending"):
+                # Сжатие уже прошло, но в счёт попадёт после первого живого
+                # хода: только он даёт реальный размер «после» из usage.
+                note = " | последнее сжатие ждёт первого хода — в счёт пойдёт после него"
+    except Exception:
+        note = ""
     logger.info(
         "idle-compact SUMMARY: сессия %s | экономия $%.5f, потрачено $%.5f, "
-        "итого $%+.5f | время %.0f сек | сжатий %d (в плюс %d, зря %d), среднее %.0f сек",
+        "итого $%+.5f | время %.0f сек | сжатий %d (в плюс %d, зря %d), среднее %.0f сек%s",
         session_id, s["saved_usd"], s["spent_usd"], s["net_usd"], s["saved_s"],
-        s["events"], s["profitable"], s["wasted"], s["avg_compact_s"],
+        s["events"], s["profitable"], s["wasted"], s["avg_compact_s"], note,
     )
 
 
