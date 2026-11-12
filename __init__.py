@@ -940,7 +940,6 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None,
                             logger.info("idle-compact: warm без захвата — сжатие пойдёт через aux")
                     except Exception:
                         logger.debug("idle-compact: begin_warm failed", exc_info=True)
-                did_compress = True
                 try:
                     try:
                         agent._compress_context(messages, "", **kwargs)
@@ -961,6 +960,27 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None,
                                 )
                         except Exception:
                             logger.debug("idle-compact: end_warm failed", exc_info=True)
+                    # Сжатие могло не состояться: ядро держит лизинг (другой
+                    # воркер уже сжимает) или прервало попытку. Тогда агент
+                    # выселять нельзя — уничтожим тёплый кеш без сжатия.
+                    comp_obj = getattr(agent, "context_compressor", None)
+                    skipped = bool(getattr(comp_obj, "_compression_skipped_due_to_lock", False))
+                    aborted = bool(getattr(agent, "_last_compress_aborted", False))
+                    shrank = True
+                    if not (skipped or aborted):
+                        try:
+                            from agent.model_metadata import estimate_messages_tokens_rough
+                            _now = get_conv(session_id)
+                            _rows = [m for m in (_now or []) if isinstance(m, dict)]
+                            shrank = int(estimate_messages_tokens_rough(_rows)) < int(size)
+                        except Exception:
+                            shrank = True
+                    did_compress = not (skipped or aborted) and shrank
+                    if not did_compress:
+                        logger.info(
+                            "idle-compact: сжатие не выполнено (lock=%s abort=%s shrank=%s) — агент не выселяем",
+                            skipped, aborted, shrank,
+                        )
 
             if ctx is not None:
                 ctx.run(run)
