@@ -1330,6 +1330,16 @@ def _start_watchdog() -> None:
     logger.info("idle-compact: часовой запущен (проверка раз в 30 сек)")
 
 
+def _plugin_version() -> str:
+    """Версия из plugin.yaml — единственное место, где она задана."""
+    try:
+        import yaml
+        with open(str(Path(__file__).with_name("plugin.yaml")), "r", encoding="utf-8") as fh:
+            return str((yaml.safe_load(fh) or {}).get("version") or "?")
+    except Exception:
+        return "?"
+
+
 def register(ctx) -> None:
     """Точка входа плагина: движок, хук конца хода и хук захвата запроса."""
     # Свой контекст-движок: штатный компрессор + warm-путь суммирования.
@@ -1390,8 +1400,8 @@ def register(ctx) -> None:
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
     logger.info(
-        "idle-compact 0.9.13 loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
-        DRY_RUN, WRITE_ENABLED,
+        "idle-compact %s loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
+        _plugin_version(), DRY_RUN, WRITE_ENABLED,
     )
     try:
         import yaml
