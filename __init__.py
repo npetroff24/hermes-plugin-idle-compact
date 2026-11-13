@@ -758,7 +758,13 @@ def _arm_engine(session_id: str) -> None:
     if not found:
         return
     agent, comp, _route, _runner = found
-    if _test_settings(session_id).get("prepare_ahead"):
+    _test = _test_settings(session_id)
+    if _test.get("reset_threshold"):
+        # Возврат к штатному порогу: None заставляет свойство пересчитать его
+        # из конфига при следующем чтении.
+        comp._threshold_tokens = None
+        logger.info("idle-compact: порог возвращён к штатному (%s)", session_id)
+    if _test.get("prepare_ahead"):
         # Диагностика: включаем ядровый prepare_ahead без перезапуска агента —
         # иначе он читается только при сборке (agent_init).
         try:
@@ -766,15 +772,10 @@ def _arm_engine(session_id: str) -> None:
             if getattr(comp, "prepared_compaction", None) is None:
                 comp.prepared_compaction = PreparedCompaction()
                 logger.info("idle-compact: prepare_ahead включён для теста (%s)", session_id)
-            _thr = _test_settings(session_id).get("threshold_tokens")
+            _thr = _test.get("threshold_tokens")
             if isinstance(_thr, int) and _thr > 0:
                 comp.threshold_tokens = _thr
                 logger.info("idle-compact: порог для теста = %s (%s)", _thr, session_id)
-            if _test_settings(session_id).get("reset_threshold"):
-                # Возврат к штатному порогу: None заставляет свойство пересчитать
-                # его из конфига при следующем чтении.
-                comp._threshold_tokens = None
-                logger.info("idle-compact: порог возвращён к штатному (%s)", session_id)
         except Exception:
             logger.debug("idle-compact: prepare_ahead enable failed", exc_info=True)
     begin = getattr(comp, "begin_warm", None)

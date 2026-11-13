@@ -1,5 +1,5 @@
 name: idle-compact
-version: 0.9.29
+version: 0.9.30
 description: "Background compression of idle sessions before prompt-cache expiry (beta)."
 author: "custom"
 kind: standalone
