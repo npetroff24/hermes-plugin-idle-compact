@@ -758,6 +758,16 @@ def _arm_engine(session_id: str) -> None:
     if not found:
         return
     agent, comp, _route, _runner = found
+    if _test_settings(session_id).get("prepare_ahead"):
+        # Диагностика: включаем ядровый prepare_ahead без перезапуска агента —
+        # иначе он читается только при сборке (agent_init).
+        try:
+            from agent.prepared_compaction import PreparedCompaction
+            if getattr(comp, "prepared_compaction", None) is None:
+                comp.prepared_compaction = PreparedCompaction()
+                logger.info("idle-compact: prepare_ahead включён для теста (%s)", session_id)
+        except Exception:
+            logger.debug("idle-compact: prepare_ahead enable failed", exc_info=True)
     begin = getattr(comp, "begin_warm", None)
     if not callable(begin):
         return
