@@ -770,6 +770,11 @@ def _arm_engine(session_id: str) -> None:
             if isinstance(_thr, int) and _thr > 0:
                 comp.threshold_tokens = _thr
                 logger.info("idle-compact: порог для теста = %s (%s)", _thr, session_id)
+            if _test_settings(session_id).get("reset_threshold"):
+                # Возврат к штатному порогу: None заставляет свойство пересчитать
+                # его из конфига при следующем чтении.
+                comp._threshold_tokens = None
+                logger.info("idle-compact: порог возвращён к штатному (%s)", session_id)
         except Exception:
             logger.debug("idle-compact: prepare_ahead enable failed", exc_info=True)
     begin = getattr(comp, "begin_warm", None)
