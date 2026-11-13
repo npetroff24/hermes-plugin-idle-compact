@@ -228,17 +228,21 @@ def request_summary(
         pass
     try:
         # httpx, а не urllib: UA ставим свой, таймаут явный (дефолт httpx —
-        # 5 с, живое сжатие длится дольше), редиректы как у urllib, доверие
-        # сертификатам — системное хранилище, как раньше.
+        # 5 с, живое сжатие длится дольше), доверие сертификатам — системное
+        # хранилище, как раньше. Редиректы не идём: httpx снимает Authorization
+        # на чужой хост, но оставляет x-api-key (режим Anthropic), и релей мог бы
+        # получить ключ пользователя. Ревью: 13.11.2026.
         with httpx.Client(
             timeout=TIMEOUT,
-            follow_redirects=True,
+            follow_redirects=False,
             verify=_ssl_context(),
         ) as client:
             resp = client.post(url, content=data,
                                headers=_headers(api_key, api_mode, base_url, session_key))
     except Exception as exc:
         raise WarmRefused(f"{type(exc).__name__}: {exc}") from exc
+    if 300 <= resp.status_code < 400:
+        raise WarmRefused(f"HTTP {resp.status_code}: redirect not followed ({resp.headers.get('location', '')})")
     if resp.status_code >= 400:
         raise WarmRefused(f"HTTP {resp.status_code}: {resp.text[:300]}")
     raw = resp.content

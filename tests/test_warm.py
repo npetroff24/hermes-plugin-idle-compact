@@ -152,6 +152,47 @@ class TestAffinityHeader(unittest.TestCase):
         self.assertIsNone(key)
 
 
+class TestRedirectSafety(unittest.TestCase):
+    """Редирект не преследуем: ключ пользователя не должен уйти на чужой хост."""
+
+    class _Resp:
+        def __init__(self, status, headers=None, content=b"{}"):
+            self.status_code = status
+            self.headers = headers or {}
+            self.content = content
+            self.text = content.decode()
+
+    class _Client:
+        seen_kwargs = None
+
+        def __init__(self, **kwargs):
+            type(self).seen_kwargs = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, *a, **kw):
+            return TestRedirectSafety._Resp(302, {"location": "https://evil.example/x"})
+
+    def test_follow_redirects_disabled(self):
+        orig = wc.httpx.Client
+        wc.httpx.Client = self._Client
+        try:
+            with self.assertRaises(wc.WarmRefused) as ctx:
+                wc.request_summary(
+                    captured={"body": {"messages": [{"role": "user", "content": "hi"}]}},
+                    prompt="summarise", api_mode="anthropic_messages",
+                    base_url="https://api.anthropic.com", api_key="k",
+                )
+        finally:
+            wc.httpx.Client = orig
+        self.assertFalse(self._Client.seen_kwargs.get("follow_redirects"))
+        self.assertIn("redirect not followed", str(ctx.exception))
+
+
 class TestEngineSignature(unittest.TestCase):
     def test_signature_matches_kernel(self):
         """Если ядро сменит сигнатуру _call_summary_llm — warm должен отключиться, а не падать."""
