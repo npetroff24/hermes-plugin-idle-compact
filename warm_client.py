@@ -25,8 +25,6 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-TIMEOUT = 300.0
-
 _UA_CACHE: str | None = None
 _SSL_CTX = None
 
@@ -210,7 +208,7 @@ def _extract_text(data: dict, api_mode: str) -> str:
 
 def request_summary(
     *, captured: dict, prompt: str, api_mode: str, base_url: str, api_key: str,
-    max_tokens: int | None = None, session_id: str | None = None,
+    timeout: float, max_tokens: int | None = None, session_id: str | None = None,
     provider: str | None = None,
 ) -> tuple[str, dict]:
     """Выполнить warm-запрос. Возвращает (текст саммари, usage)."""
@@ -233,7 +231,7 @@ def request_summary(
         # на чужой хост, но оставляет x-api-key (режим Anthropic), и релей мог бы
         # получить ключ пользователя. Ревью: 13.11.2026.
         with httpx.Client(
-            timeout=TIMEOUT,
+            timeout=timeout,
             follow_redirects=False,
             verify=_ssl_context(),
         ) as client:
@@ -268,7 +266,7 @@ def request_summary(
 
 def apply_warm(
     *, captured: dict, prompt: str, api_mode: str, base_url: str, api_key: str,
-    max_tokens: int | None = None, session_id: str | None = None,
+    timeout: float, max_tokens: int | None = None, session_id: str | None = None,
     provider: str | None = None,
 ) -> tuple[str, dict]:
     """Проверить применимость и выполнить warm-запрос."""
@@ -280,6 +278,6 @@ def apply_warm(
         raise WarmRefused("нет маршрута или ключа")
     return request_summary(
         captured=captured, prompt=prompt, api_mode=api_mode,
-        base_url=base_url, api_key=api_key, max_tokens=max_tokens,
+        base_url=base_url, api_key=api_key, timeout=timeout, max_tokens=max_tokens,
         session_id=session_id, provider=provider,
     )

@@ -60,10 +60,10 @@ WRITE_ENABLED = True      # боевое сжатие включено
 # Пустой = все human-сессии; непустой = только перечисленные (тесты/откат)
 ALLOWLIST: set[str] = set()
 
-# Единственный источник правды о TTL — model_ttl.py (его же читает savings.py).
+# Единственный источник правды о TTL — model_ttl.py (его же читает savings.py),
+# числа политики — policy.py. Здесь литералов времени нет.
 from .model_ttl import DEFAULT_TTL_SECONDS, TTL_BY_MODEL_SUBSTR, ttl_for_model
-
-TTL_FACTOR = 0.9
+from . import policy
 
 # Модели, для которых уже жаловались на обрезку таймера выселением (один раз за процесс).
 _warned_evict_cap: set[str] = set()
@@ -252,13 +252,13 @@ def _live_gate(comp=None, session_id: str | None = None) -> int | None:
 
 def _ttl_for_model(model: str) -> int:
     """TTL модели из общего модуля model_ttl.py."""
-    return ttl_for_model(model)
+    return policy.ttl_for(model)
 
 
 def _evict_ttl() -> float:
     """TTL выселения агента из кеша gateway: config agent.agent_cache.idle_ttl_secs.
 
-    Дефолт ядра — 3600 с (``_AGENT_CACHE_IDLE_TTL_SECS`` в gateway/run.py).
+    Дефолт — ``policy.AGENT_CACHE_IDLE_TTL_DEFAULT_S`` (значение ядра).
     Плагин агента только подглядывает, поэтому таймер обязан срабатывать
     раньше выселения — иначе «agent evicted/absent» и скип.
     """
@@ -272,7 +272,7 @@ def _evict_ttl() -> float:
             return val
     except Exception:
         pass
-    return 3600.0
+    return policy.AGENT_CACHE_IDLE_TTL_DEFAULT_S
 
 
 def _delay_for_model(model: str, session_id: str | None = None) -> float:
@@ -282,10 +282,8 @@ def _delay_for_model(model: str, session_id: str | None = None) -> float:
             return float(test["seconds"])
         except Exception:
             pass
-    # Задержка = min(TTL модели, TTL выселения агента) x 0.9: сжатие идёт
+    # Задержка = min(TTL модели, TTL выселения агента) x запас: сжатие идёт
     # пока живы И провайдерский кеш, И агент в памяти gateway.
-    # Карта TTL нужна также для вердикта «был бы кеш тёплым»
-    # и отсечки устаревших дедлайнов.
     model_ttl = _ttl_for_model(model)
     evict = _evict_ttl()
     if model_ttl > evict and model not in _warned_evict_cap:
@@ -294,9 +292,9 @@ def _delay_for_model(model: str, session_id: str | None = None) -> float:
             "idle-compact: %s: кеш живёт %dс, но Hermes выселяет агент "
             "через %dс — таймер урезан до %dс. Поднимите "
             "agent.agent_cache.idle_ttl_secs для полного TTL.",
-            model, model_ttl, int(evict), int(min(model_ttl, evict) * TTL_FACTOR),
+            model, model_ttl, int(evict), int(policy.schedule_delay_for(model, evict)),
         )
-    return float(min(model_ttl, evict)) * TTL_FACTOR
+    return policy.schedule_delay_for(model, evict)
 
 
 def _rough_tokens(session_id: str) -> int:
@@ -751,8 +749,9 @@ def _arm_engine(session_id: str) -> None:
     if not cap:
         return
     ts = float(cap.get("ts") or 0)
-    # Старше TTL кеша повтор бессмысленен: префикса уже нет в кеше провайдера.
-    if not ts or time.time() - ts > 600:
+    model = cap.get("model") or ""
+    # Старше окна кеша повтор бессмыслен: префикса уже нет у провайдера.
+    if not ts or time.time() - ts > policy.arm_window_for(model):
         return
     found = _resident(session_id)
     if not found:
@@ -767,6 +766,7 @@ def _arm_engine(session_id: str) -> None:
         "api_key": getattr(agent, "api_key", ""),
         "session_id": session_id,
         "provider": getattr(agent, "provider", ""),
+        "model": cap.get("model") or getattr(agent, "model", ""),
         "_cap_ts": ts,
     }
     begin(cap, route)
@@ -1103,7 +1103,7 @@ def _restore_pending() -> None:
         # рестарт через 2.5 часа после дедлайна, сжатие ушло холодным).
         # Сжимать по такой метке бессмысленно — это сделает ядро при возврате.
         ttl = _delay_for_model(model, session_id)
-        if now - deadline > max(ttl * 2, 3600):
+        if now - deadline > policy.watchdog_grace(ttl):
             dropped += 1
             continue
         delay = max(0.0, deadline - now)
@@ -1231,12 +1231,16 @@ def _on_pre_api_request(**kw) -> None:
 def _capture_for(session_id: str) -> dict | None:
     with _captures_lock:
         entry = _captures.get(session_id)
-    if not entry:
-        return None
-    # Старше TTL кеша — префикс уже не тёплый, повтор бессмысленен
-    if time.time() - float(entry.get("ts") or 0) > 7200:
-        return None
-    return entry
+        if not entry:
+            return None
+        # Старше TTL кеша — префикс уже не тёплый, повтор бессмыслен.
+        # Протухшую запись выбрасываем: иначе тело запроса висит в памяти
+        # до следующего хода этой сессии или до смерти процесса.
+        age = time.time() - float(entry.get("ts") or 0)
+        if age > policy.capture_max_age_for(entry.get("model") or ""):
+            _captures.pop(session_id, None)
+            return None
+        return entry
 
 
 _watchdog_started = False
@@ -1268,7 +1272,7 @@ def _sweep_due() -> int:
             deadline = float(entry.get("deadline") or 0)
             ttl = _delay_for_model(model, sid)
             # Совсем старые дедлайны не трогаем: кеш давно мёртв, сожмёт ядро при возврате.
-            if now - deadline > max(ttl * 2, 3600):
+            if now - deadline > policy.watchdog_grace(ttl):
                 _forget(sid)
                 logger.info("idle-compact: дедлайн %s устарел, ожидание снято", sid)
                 continue

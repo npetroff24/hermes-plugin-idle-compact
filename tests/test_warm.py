@@ -114,17 +114,17 @@ class TestApplyWarm(unittest.TestCase):
     def test_no_capture(self):
         with self.assertRaises(wc.WarmRefused):
             wc.apply_warm(captured={}, prompt="p", api_mode="chat_completions",
-                          base_url="https://x", api_key="k")
+                          base_url="https://x", api_key="k", timeout=5.0)
 
     def test_unsupported_mode(self):
         with self.assertRaises(wc.WarmRefused):
             wc.apply_warm(captured={"messages": [{"role": "user", "content": "x"}]},
-                          prompt="p", api_mode="weird", base_url="https://x", api_key="k")
+                          prompt="p", api_mode="weird", base_url="https://x", api_key="k", timeout=5.0)
 
     def test_no_route(self):
         with self.assertRaises(wc.WarmRefused):
             wc.apply_warm(captured={"messages": [{"role": "user", "content": "x"}]},
-                          prompt="p", api_mode="chat_completions", base_url="", api_key="")
+                          prompt="p", api_mode="chat_completions", base_url="", api_key="", timeout=5.0)
 
 
 class TestAffinityHeader(unittest.TestCase):
@@ -185,7 +185,7 @@ class TestRedirectSafety(unittest.TestCase):
                 wc.request_summary(
                     captured={"body": {"messages": [{"role": "user", "content": "hi"}]}},
                     prompt="summarise", api_mode="anthropic_messages",
-                    base_url="https://api.anthropic.com", api_key="k",
+                    base_url="https://api.anthropic.com", api_key="k", timeout=5.0,
                 )
         finally:
             wc.httpx.Client = orig

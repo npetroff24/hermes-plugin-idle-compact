@@ -24,6 +24,7 @@ from __future__ import annotations
 import inspect
 import logging
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +149,18 @@ class IdleWarmCompressor:
 
                 if capture and route:
                     try:
-                        from . import warm_client
+                        from . import policy, warm_client
+
+                        # Захват мог протухнуть между планированием и вызовом:
+                        # повторять старый префикс — платить полную цену.
+                        cap_ts = float(route.get("_cap_ts") or 0)
+                        _model = route.get("model") or getattr(self, "model", "")
+                        if cap_ts and time.time() - cap_ts > policy.capture_max_age_for(_model):
+                            logger.info(
+                                "idle-warm: захват протух (%.0fс > ttl модели), идём холодным путём",
+                                time.time() - cap_ts,
+                            )
+                            return super()._call_summary_llm(prompt, prompt_started_at)
 
                         text, stats = warm_client.apply_warm(
                             captured=capture,
@@ -156,6 +168,7 @@ class IdleWarmCompressor:
                             api_mode=route.get("api_mode") or self.api_mode,
                             base_url=route.get("base_url") or self.base_url,
                             api_key=route.get("api_key") or self.api_key,
+                            timeout=policy.REQUEST_TIMEOUT_S,
                             max_tokens=self._warm_max_tokens(),
                             session_id=route.get("session_id"),
                             provider=route.get("provider") or getattr(self, "provider", ""),
