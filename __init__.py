@@ -730,9 +730,46 @@ def _on_post_api(session_id: str = "", **kwargs) -> None:
         _post_api_seen.add(session_id)
         logger.info("idle-compact: post_api hook reached %s", session_id)
     try:
+        _arm_engine(session_id)
+    except Exception:
+        logger.debug("idle-compact: engine arm failed", exc_info=True)
+    try:
         _on_session_end(session_id=session_id)
     except Exception:
         logger.exception("idle-compact: timer hook failed for %s", session_id)
+
+
+def _arm_engine(session_id: str) -> None:
+    """Держим движок агента заряженным последним реальным запросом.
+
+    Сжатие запускает не только наш таймер: ядро делает это само
+    (``compression.prepare_ahead``, post-turn, inline при переполнении). Если у
+    движка уже лежит свежий захват, любой из этих путей пойдёт по тёплому кешу
+    без нашего участия — ровно то, что нужно для сокращения приватного кода.
+    """
+    cap = _capture_for(session_id)
+    if not cap:
+        return
+    ts = float(cap.get("ts") or 0)
+    # Старше TTL кеша повтор бессмысленен: префикса уже нет в кеше провайдера.
+    if not ts or time.time() - ts > 600:
+        return
+    found = _resident(session_id)
+    if not found:
+        return
+    agent, comp, _route, _runner = found
+    begin = getattr(comp, "begin_warm", None)
+    if not callable(begin):
+        return
+    route = {
+        "api_mode": cap.get("api_mode") or getattr(agent, "api_mode", ""),
+        "base_url": cap.get("base_url") or getattr(agent, "base_url", ""),
+        "api_key": getattr(agent, "api_key", ""),
+        "session_id": session_id,
+        "provider": getattr(agent, "provider", ""),
+        "_cap_ts": ts,
+    }
+    begin(cap, route)
 
 
 def _on_session_end(session_id: str = "", **kwargs) -> None:
