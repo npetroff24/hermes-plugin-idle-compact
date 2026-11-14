@@ -98,7 +98,31 @@ def _test_settings(session_id: str | None = None) -> dict:
 GATE_K = 2.0          # сжимаем только если контекст >= 2x цели сжатия
 THRESHOLD_TOKENS = 500_000   # запасной порог, если конфиг нечитаем
 TARGET_RATIO = 0.2           # сверено: tokens_after ~0.2 x threshold
-HUMAN_SOURCES = {"telegram", "desktop", "cli", "tui", "messaging", "local"}
+# Машинные источники сессий: сжимать их в фоне не надо. Всё остальное считаем
+# человеческим — включая платформы, которых ещё нет (перевёрнутая логика:
+# раньше белый список отставал от ядра и молча пропускал gui,
+# discord, slack и др.). Состав сверен с ядром: hermes_state_local_migration
+# (NOT_CLIENT_LABELS), gateway/session_policy (SURFACES), gateway/config
+# (Platform). Кортеж фиксированного порядка — из него же строится SQL.
+MACHINE_SOURCES = (
+    "subagent", "oneshot", "tool", "cron", "kanban", "batch", "curator",
+    "a2a", "api_server", "webhook", "msgraph_webhook", "bot_room",
+    "webui", "import", "recovered", "unknown",
+)
+
+
+def _is_machine_source(source: object) -> bool:
+    """Машинная ли сессия: такие не ставим на таймер и не сжимаем в фоне."""
+    return str(source or "") in MACHINE_SOURCES
+
+
+def _human_filter_sql() -> tuple[str, tuple]:
+    """SQL-фильтр «только человеческие»: параметризованный NOT IN из MACHINE_SOURCES."""
+    placeholders = ",".join("?" * len(MACHINE_SOURCES))
+    return (
+        f"AND COALESCE(source,'') NOT IN ({placeholders}) ",
+        tuple(MACHINE_SOURCES),
+    )
 
 _HERMES_HOME_FALLBACK = Path.home() / ".hermes"
 
@@ -123,6 +147,38 @@ def _home() -> Path:
     return _HERMES_HOME_FALLBACK
 
 
+def _yaml_module():
+    """YAML-модуль: сначала ядровый hermes_yaml, потом PyYAML.
+
+    PyYAML не объявлен в зависимостях ядра и держится на чужой транзитивной
+    зависимости, а на Python 3.14 у него вообще нет колеса. hermes_yaml
+    (ядровый фасад над ruamel) есть всегда, раз стоит Hermes. Идея — PR #2
+    от apoapostolov, спасибо.
+    """
+    try:
+        import hermes_yaml
+        return hermes_yaml
+    except Exception:
+        import yaml
+        return yaml
+
+
+def _read_yaml_file(path) -> dict:
+    """Прочитать YAML-файл в dict. Никогда не бросает: ошибка → {}."""
+    try:
+        yaml = _yaml_module()
+        with open(str(path), "r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _read_config() -> dict:
+    """Весь config.yaml как dict. Никогда не бросает: ошибка → {}."""
+    return _read_yaml_file(_home() / "config.yaml")
+
+
 def _state_db() -> str:
     return str(_home() / "state.db")
 
@@ -145,9 +201,7 @@ def _live_target(window_tokens: int | None = None) -> int | None:
     """
     global _warned_no_config
     try:
-        import yaml
-        with open(str(_home() / "config.yaml"), "r", encoding="utf-8") as fh:
-            cfg = yaml.safe_load(fh) or {}
+        cfg = _read_config()
         comp = cfg.get("compression") or {}
         thr = comp.get("threshold_tokens")
         if thr is None and comp.get("threshold") is not None:
@@ -178,9 +232,7 @@ def _live_target(window_tokens: int | None = None) -> int | None:
 def _plugin_cfg() -> dict:
     """Секция plugins.idle_compact из config.yaml (или пустой словарь)."""
     try:
-        import yaml
-        with open(str(_home() / "config.yaml"), "r", encoding="utf-8") as fh:
-            cfg = yaml.safe_load(fh) or {}
+        cfg = _read_config()
         return ((cfg.get("plugins") or {}).get("idle_compact") or {}) if isinstance(cfg, dict) else {}
     except Exception:
         return {}
@@ -189,9 +241,7 @@ def _plugin_cfg() -> dict:
 def _hub_auto_ratio() -> float:
     """Порог автосжатия из хаба настроек (`plugins.entries.*.settings`)."""
     try:
-        import yaml
-        with open(str(_home() / "config.yaml"), "r", encoding="utf-8") as fh:
-            cfg = yaml.safe_load(fh) or {}
+        cfg = _read_config()
         entries = (cfg.get("plugins") or {}).get("entries") or {}
         if not isinstance(entries, dict):
             return 0.0
@@ -263,9 +313,7 @@ def _evict_ttl() -> float:
     раньше выселения — иначе «agent evicted/absent» и скип.
     """
     try:
-        import yaml
-        with open(str(_home() / "config.yaml"), "r", encoding="utf-8") as fh:
-            cfg = yaml.safe_load(fh) or {}
+        cfg = _read_config()
         sec = ((cfg.get("agent") or {}).get("agent_cache") or {}) if isinstance(cfg, dict) else {}
         val = float(sec.get("idle_ttl_secs") or 0)
         if val > 0:
@@ -333,11 +381,13 @@ def scan_candidates() -> list[dict]:
     con = sqlite3.connect(f"file:{_state_db()}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
+        _flt, _params = _human_filter_sql()
         cur = con.execute(
             "SELECT id, source, model, message_count, last_activity_at "
             "FROM sessions WHERE archived = 0 AND ended_at IS NULL "
-            "AND source IN ('telegram','desktop','cli','tui','messaging','local') "
-            "ORDER BY last_activity_at DESC LIMIT 50"
+            + _flt +
+            "ORDER BY last_activity_at DESC LIMIT 50",
+            _params,
         )
         rows = [dict(r) for r in cur.fetchall()]
     finally:
@@ -650,7 +700,7 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
         row = _session_row(session_id)
         if not row:
             return
-        if row.get("source") not in HUMAN_SOURCES:
+        if _is_machine_source(row.get("source")):
             return
         last_ts = row.get("last_activity_at") or 0
         if last_ts > stamp:
@@ -780,9 +830,9 @@ def _on_session_end(session_id: str = "", **kwargs) -> None:
     except Exception:
         logger.exception("idle-compact: db read failed")
         return
-    if not row or row.get("source") not in HUMAN_SOURCES:
+    if not row or _is_machine_source(row.get("source")):
         logger.debug(
-            "idle-compact: session %s source %r not human, no timer",
+            "idle-compact: session %s source %r is machine, no timer",
             session_id, (row or {}).get("source"),
         )
         return
@@ -1092,7 +1142,7 @@ def _restore_pending() -> None:
             continue
         row = _session_row(session_id)
         # Сессия исчезла/закрыта/не human — забываем
-        if not row or row.get("source") not in HUMAN_SOURCES or row.get("ended_at"):
+        if not row or _is_machine_source(row.get("source")) or row.get("ended_at"):
             dropped += 1
             continue
         # Уже был активный ход после нашего таймера — ждать нечего
@@ -1333,9 +1383,8 @@ def _start_watchdog() -> None:
 def _plugin_version() -> str:
     """Версия из plugin.yaml — единственное место, где она задана."""
     try:
-        import yaml
-        with open(str(Path(__file__).with_name("plugin.yaml")), "r", encoding="utf-8") as fh:
-            return str((yaml.safe_load(fh) or {}).get("version") or "?")
+        data = _read_yaml_file(Path(__file__).with_name("plugin.yaml"))
+        return str(data.get("version") or "?")
     except Exception:
         return "?"
 
@@ -1357,10 +1406,7 @@ def register(ctx) -> None:
             # поэтому дефолты конструктора (0.5/0.2) остались бы навсегда.
             eng_kwargs: dict = {"model": ""}
             try:
-                import yaml
-
-                with open(str(_home() / "config.yaml"), "r", encoding="utf-8") as fh:
-                    _comp = (yaml.safe_load(fh) or {}).get("compression") or {}
+                _comp = _read_config().get("compression") or {}
                 if _comp.get("target_ratio") is not None:
                     eng_kwargs["summary_target_ratio"] = float(_comp["target_ratio"])
                 if _comp.get("threshold") is not None and _comp.get("threshold_tokens") is None:
@@ -1404,9 +1450,7 @@ def register(ctx) -> None:
         _plugin_version(), DRY_RUN, WRITE_ENABLED,
     )
     try:
-        import yaml
-        with open(str(_home() / "config.yaml"), "r", encoding="utf-8") as fh:
-            _eng = ((yaml.safe_load(fh) or {}).get("context") or {}).get("engine", "")
+        _eng = ((_read_config().get("context") or {}).get("engine", ""))
         if str(_eng or "").strip().lower() not in ("idle_warm", "idle-warm"):
             logger.warning(
                 "idle-compact: context.engine=%r — фон жмёт холодным aux без кеша; "
