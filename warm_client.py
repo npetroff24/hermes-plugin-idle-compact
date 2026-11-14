@@ -53,6 +53,8 @@ def _user_agent() -> str:
     if _UA_CACHE:
         return _UA_CACHE
     version = "0.0.0"
+    # Осознанно regex, а не YAML: второй читатель версии, независимый
+    # от YAML-стека (warm_client грузится отдельно, в т.ч. в тестах).
     try:
         text = (Path(__file__).resolve().parent / "plugin.yaml").read_text(encoding="utf-8")
         m = re.search(r'(?m)^version:\s*["\']?([0-9][^"\'\s]*)', text)

@@ -26,10 +26,11 @@ def load_init():
     return mod
 
 
-REQUIRED_MACHINE = {
-    "subagent", "oneshot", "tool", "cron", "kanban", "batch",
-    "curator", "a2a", "api_server", "webhook", "bot_room",
-}
+EXPECTED_MACHINE = (
+    "subagent", "oneshot", "tool", "cron", "kanban", "batch", "curator",
+    "a2a", "api_server", "webhook", "msgraph_webhook", "bot_room",
+    "webui", "import", "recovered", "unknown",
+)
 
 
 class TestMachineSources(unittest.TestCase):
@@ -37,13 +38,9 @@ class TestMachineSources(unittest.TestCase):
     def setUpClass(cls):
         cls.mod = load_init()
 
-    def test_list_covers_core_machine_sources(self):
-        """Список не «похудел» молча: обязательные машинные источники на месте."""
-        present = set(self.mod.MACHINE_SOURCES)
-        self.assertTrue(
-            REQUIRED_MACHINE <= present,
-            f"потеряны источники: {REQUIRED_MACHINE - present}",
-        )
+    def test_list_matches_expected_exactly(self):
+        """Точный состав и порядок: потеря или перестановка — падение."""
+        self.assertEqual(tuple(self.mod.MACHINE_SOURCES), EXPECTED_MACHINE)
 
     def test_list_is_fixed_order_tuple(self):
         """Кортеж фиксированного порядка — из него же строится SQL."""
@@ -115,7 +112,8 @@ class TestScanCandidates(unittest.TestCase):
         con.execute("CREATE TABLE messages (content TEXT)")
         con.executemany(
             "INSERT INTO sessions VALUES (?, ?, 'm', 1, 1.0, 0, NULL)",
-            [("s-sub", "subagent"), ("s-disc", "discord"), ("s-cron", "cron")],
+            [("s-sub", "subagent"), ("s-disc", "discord"), ("s-cron", "cron"),
+             ("s-null", None), ("s-empty", "")],
         )
         con.commit()
         con.close()
@@ -124,6 +122,8 @@ class TestScanCandidates(unittest.TestCase):
                 out = m.scan_candidates()
         ids = {r["id"] for r in out}
         self.assertIn("s-disc", ids)
+        self.assertIn("s-null", ids)   # COALESCE: NULL не выпадает молча
+        self.assertIn("s-empty", ids)
         self.assertNotIn("s-sub", ids)
         self.assertNotIn("s-cron", ids)
 
@@ -146,13 +146,13 @@ class TestYamlHelper(unittest.TestCase):
         m = self._mod_with_home("compression:\n  threshold: 0.5\n")
         self.assertEqual(m._read_config().get("compression"), {"threshold": 0.5})
 
-    def test_read_config_missing_file_is_empty(self):
+    def test_read_config_missing_file_is_none(self):
         m = self._mod_with_home(None)
-        self.assertEqual(m._read_config(), {})
+        self.assertIsNone(m._read_config())
 
-    def test_read_config_broken_yaml_is_empty(self):
+    def test_read_config_broken_yaml_is_none(self):
         m = self._mod_with_home("compression: [unclosed\n")
-        self.assertEqual(m._read_config(), {})
+        self.assertIsNone(m._read_config())
 
     def test_prefers_hermes_yaml_over_pyyaml(self):
         """hermes_yaml первый: подсовываем фейковый, PyYAML прячем."""
@@ -177,7 +177,7 @@ class TestYamlHelper(unittest.TestCase):
                     got = m._yaml_module()
         self.assertIs(got, fake)
 
-    def test_no_yaml_at_all_returns_empty(self):
+    def test_no_yaml_at_all_returns_none(self):
         """Нет ни hermes_yaml, ни yaml — читаем {} без исключения."""
         import builtins
         m = self._mod_with_home("a: 1\n")
@@ -192,7 +192,7 @@ class TestYamlHelper(unittest.TestCase):
             with mock.patch.dict(sys.modules):
                 sys.modules.pop("hermes_yaml", None)
                 sys.modules.pop("yaml", None)
-                self.assertEqual(m._read_config(), {})
+                self.assertIsNone(m._read_config())
 
     def test_yaml11_parity_on_off(self):
         """YAML 1.1: `on` читается как True — как в PyYAML, так и в фасаде."""
@@ -203,6 +203,78 @@ class TestYamlHelper(unittest.TestCase):
         """Версия берётся из plugin.yaml, а не из конфига."""
         m = load_init()
         self.assertRegex(m._plugin_version(), r"^\d+\.\d+\.\d+$")
+
+
+class TestFireGate(unittest.TestCase):
+    """Машинная сессия, дошедшая до _fire, не должна уйти в сжатие."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load_init()
+
+    def test_fire_skips_machine_without_compress(self):
+        import time
+        m = self.mod
+        with mock.patch.object(m, "_load_pending", return_value={}):
+            with mock.patch.object(m, "_forget"):
+                with mock.patch.object(m, "_session_row", return_value={
+                        "source": "subagent", "last_activity_at": 0}):
+                    with mock.patch.object(m, "_do_compress") as dc:
+                        m._fire("s-sub", time.time(), "x")
+        self.assertFalse(dc.called)
+
+
+class TestLiveTargetUnreadable(unittest.TestCase):
+    """Нечитаемый конфиг — пропуск с предупреждением, а не дефолт молча."""
+
+    def _mod_with_home(self, text=None):
+        m = load_init()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        if text is not None:
+            (Path(tmp.name) / "config.yaml").write_text(text, encoding="utf-8")
+        m._home = lambda: Path(tmp.name)  # type: ignore[attr-defined]
+        m._warned_no_config = False  # type: ignore[attr-defined]
+        return m
+
+    def test_missing_config_skips(self):
+        m = self._mod_with_home(None)
+        self.assertIsNone(m._live_target(200_000))
+        self.assertTrue(m._warned_no_config)
+
+    def test_readable_empty_config_uses_kernel_default(self):
+        m = self._mod_with_home("")
+        # Окно 200К < 512К: 0.75 × 200000 × 0.2 = 30000
+        self.assertEqual(m._live_target(200_000), 30000)
+
+
+class TestYamlImportGuard(unittest.TestCase):
+    """Инвариант «весь YAML через _yaml_module»: AST-страж, как test_policy."""
+
+    def test_yaml_imports_only_in_helper(self):
+        import ast
+        offenders = []
+        for path in sorted(PLUGIN_DIR.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            helper = next((n for n in ast.walk(tree)
+                           if isinstance(n, ast.FunctionDef) and n.name == "_yaml_module"),
+                          None)
+            inside = {id(n) for n in ast.walk(helper)} if helper else set()
+            for node in ast.walk(tree):
+                if id(node) in inside:
+                    continue
+                if isinstance(node, ast.Import):
+                    if any(a.name.split(".")[0] in ("yaml", "hermes_yaml")
+                           for a in node.names):
+                        offenders.append(f"{path.name}:{node.lineno} import")
+                elif isinstance(node, ast.ImportFrom):
+                    if (node.module or "").split(".")[0] in ("yaml", "hermes_yaml"):
+                        offenders.append(f"{path.name}:{node.lineno} from-import")
+                elif isinstance(node, ast.Call):
+                    f = node.func
+                    if isinstance(f, ast.Name) and f.id == "__import__":
+                        offenders.append(f"{path.name}:{node.lineno} __import__")
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":

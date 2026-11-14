@@ -3,7 +3,7 @@
 Логика:
 - после каждого хода (хук on_session_end) ставим/сбрасываем таймер сессии:
   delay = TTL(модель) x 0.9 (таблица TTL_BY_MODEL_SUBSTR + замер/дефолт);
-- таймер сработал: сессия всё ещё тиха, источник human, размер > гейта —
+- таймер сработал: сессия всё ещё тиха, источник не машинный, размер > гейта —
   сжимаем ядром (штатный путь) с warm-суммированием по кешу;
 - гейт = цель x 2, цель = threshold_tokens x target_ratio
   (живой порог компрессора; без него — из config.yaml).
@@ -118,7 +118,9 @@ def _is_machine_source(source: object) -> bool:
 
 def _human_filter_sql() -> tuple[str, tuple]:
     """SQL-фильтр «только человеческие»: параметризованный NOT IN из MACHINE_SOURCES."""
-    placeholders = ",".join("?" * len(MACHINE_SOURCES))
+    if not MACHINE_SOURCES:
+        raise ValueError("MACHINE_SOURCES пуст")
+    placeholders = ",".join(["?"] * len(MACHINE_SOURCES))
     return (
         f"AND COALESCE(source,'') NOT IN ({placeholders}) ",
         tuple(MACHINE_SOURCES),
@@ -155,27 +157,35 @@ def _yaml_module():
     (ядровый фасад над ruamel) есть всегда, раз стоит Hermes. Идея — PR #2
     от apoapostolov, спасибо.
     """
-    try:
-        import hermes_yaml
-        return hermes_yaml
-    except Exception:
-        import yaml
-        return yaml
+    for _name in ("hermes_yaml", "yaml"):
+        try:
+            mod = __import__(_name)
+            if hasattr(mod, "safe_load"):
+                return mod
+        except Exception:
+            continue
+    raise ImportError("no YAML module with safe_load")
 
 
-def _read_yaml_file(path) -> dict:
-    """Прочитать YAML-файл в dict. Никогда не бросает: ошибка → {}."""
+def _read_yaml_file(path):
+    """Прочитать YAML-файл в dict. Никогда не бросает: ошибка → None.
+
+    None означает «не прочитали» (нет файла, нет YAML-модуля, битый файл) —
+    это отличается от {} («прочитали, пусто») и позволяет вызывающему
+    честно сказать «конфиг нечитаем», а не считать дефолты молча.
+    """
     try:
         yaml = _yaml_module()
         with open(str(path), "r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
         return data if isinstance(data, dict) else {}
     except Exception:
-        return {}
+        logger.debug("idle-compact: yaml read failed for %s", path, exc_info=True)
+        return None
 
 
-def _read_config() -> dict:
-    """Весь config.yaml как dict. Никогда не бросает: ошибка → {}."""
+def _read_config():
+    """Весь config.yaml как dict. Никогда не бросает: ошибка → None."""
     return _read_yaml_file(_home() / "config.yaml")
 
 
@@ -202,6 +212,8 @@ def _live_target(window_tokens: int | None = None) -> int | None:
     global _warned_no_config
     try:
         cfg = _read_config()
+        if cfg is None:
+            raise ValueError("config.yaml unreadable")
         comp = cfg.get("compression") or {}
         thr = comp.get("threshold_tokens")
         if thr is None and comp.get("threshold") is not None:
@@ -241,7 +253,7 @@ def _plugin_cfg() -> dict:
 def _hub_auto_ratio() -> float:
     """Порог автосжатия из хаба настроек (`plugins.entries.*.settings`)."""
     try:
-        cfg = _read_config()
+        cfg = _read_config() or {}
         entries = (cfg.get("plugins") or {}).get("entries") or {}
         if not isinstance(entries, dict):
             return 0.0
@@ -1383,7 +1395,7 @@ def _start_watchdog() -> None:
 def _plugin_version() -> str:
     """Версия из plugin.yaml — единственное место, где она задана."""
     try:
-        data = _read_yaml_file(Path(__file__).with_name("plugin.yaml"))
+        data = _read_yaml_file(Path(__file__).with_name("plugin.yaml")) or {}
         return str(data.get("version") or "?")
     except Exception:
         return "?"
@@ -1406,7 +1418,7 @@ def register(ctx) -> None:
             # поэтому дефолты конструктора (0.5/0.2) остались бы навсегда.
             eng_kwargs: dict = {"model": ""}
             try:
-                _comp = _read_config().get("compression") or {}
+                _comp = (_read_config() or {}).get("compression") or {}
                 if _comp.get("target_ratio") is not None:
                     eng_kwargs["summary_target_ratio"] = float(_comp["target_ratio"])
                 if _comp.get("threshold") is not None and _comp.get("threshold_tokens") is None:
@@ -1450,7 +1462,7 @@ def register(ctx) -> None:
         _plugin_version(), DRY_RUN, WRITE_ENABLED,
     )
     try:
-        _eng = ((_read_config().get("context") or {}).get("engine", ""))
+        _eng = (((_read_config() or {}).get("context") or {}).get("engine", ""))
         if str(_eng or "").strip().lower() not in ("idle_warm", "idle-warm"):
             logger.warning(
                 "idle-compact: context.engine=%r — фон жмёт холодным aux без кеша; "

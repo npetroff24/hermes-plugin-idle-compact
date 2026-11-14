@@ -61,7 +61,7 @@ reasoning are unaffected.
    ```
 
    The timer moves to ~76 min on its own, no code changes needed.
-2. On fire: session still quiet, human source, size above gate.
+2. On fire: session still quiet, source not machine, size above gate.
    The gate is your saved threshold (a share of the model window),
    or the core compression target × 2 when nothing is saved.
 3. The plugin grabs the last real request (`pre_api_request` hook) and enables
@@ -207,7 +207,7 @@ tools и reasoning не ломаются.
    ```
 
    Таймер сам переедет на ~76 минут, код трогать не надо.
-2. Сработал: сессия тиха, источник human, размер > гейта.
+2. Сработал: сессия тиха, источник не машинный, размер > гейта.
    Гейт — сохранённый порог (доля окна модели) либо цель
    сжатия ядра × 2, если ничего не сохранено.
 3. Плагин захватывает последний реальный запрос (хук `pre_api_request`) и
