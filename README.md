@@ -1,6 +1,6 @@
 # idle-compact
 
-Background compaction for idle Hermes-agent chats — before prompt-cache expiry.
+Cache-warm compaction for Hermes-agent chats — in the background when idle, on the warm path when busy.
 
 ## The problem
 
@@ -159,7 +159,7 @@ Compaction archives rows (`active=0`), never deletes.
 
 # idle-compact (на русском)
 
-Фоновое сжатие простаивающих чатов Hermes-агента — до истечения prompt-cache.
+Сжатие чатов Hermes-агента по кешу — в фоне, когда простой, тёплым путём, когда работа.
 
 ## Проблема
 
