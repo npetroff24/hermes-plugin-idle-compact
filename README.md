@@ -113,7 +113,7 @@ hermes plugins disable idle-compact
 # one-time cleanup of leftover state from ≤0.9.17
 rm ~/.hermes/idle_compact_pending.json ~/.hermes/idle_*.json
 # Windows (PowerShell):
-# Remove-Item "$env:LOCALAPPDATA\\hermes\\idle_compact_pending.json", "$env:LOCALAPPDATA\\hermes\\idle_*.json"
+# Remove-Item "$env:LOCALAPPDATA\hermes\idle_compact_pending.json", "$env:LOCALAPPDATA\hermes\idle_*.json"
 ```
 
 Compaction archives rows (`active=0`), never deletes.
@@ -256,7 +256,11 @@ hermes plugins disable idle-compact
 # разовая чистка остатков от версий ≤0.9.17
 rm ~/.hermes/idle_compact_pending.json ~/.hermes/idle_*.json
 # Windows (PowerShell):
-# Remove-Item "$env:LOCALAPPDATA\\hermes\\idle_compact_pending.json", "$env:LOCALAPPDATA\\hermes\\idle_*.json"
+# Remove-Item "$env:LOCALAPPDATA\hermes\idle_compact_pending.json", "$env:LOCALAPPDATA\hermes\idle_*.json"
 ```
 
 Сжатие архивирует строки (`active=0`), не удаляет.
+
+## License / Лицензия
+
+MIT — see LICENSE file / см. файл LICENSE.

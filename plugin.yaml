@@ -1,7 +1,7 @@
 name: idle-compact
 version: 0.9.34
 description: "Background compression of idle sessions before prompt-cache expiry (beta)."
-author: "custom"
+author: "npetroff24"
 kind: standalone
 provides_hooks: ["on_session_end", "post_api_request", "pre_api_request"]
 provides_middleware: ["llm_execution"]
