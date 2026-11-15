@@ -83,10 +83,10 @@ class TestCommandRegistration(StatusBase):
         self.assertIn("idle-compact", ctx.commands)
         out = ctx.commands["idle-compact"]("")
         self.assertTrue(out.startswith("idle-compact 9.9.9-test"))
-        self.assertNotIn("тёплое сжатие", out)  # диагностика — только в debug
+        self.assertNotIn("warm compaction", out)  # диагностика — только в debug
         dbg = ctx.commands["idle-compact"]("debug")
         self.assertIn("· debug", dbg)
-        self.assertIn("тёплое сжатие: нет", dbg)
+        self.assertIn("warm compaction: off", dbg)
 
 
 class TestPanelMoney(StatusBase):
@@ -114,16 +114,16 @@ class TestPanelMoney(StatusBase):
         mod, _home = self._home_with_ledger()
         out = mod._cmd_status("")
         # net +0.05, base 0.12 → 42%
-        self.assertIn("сэкономлено: +$0.05 — это 42% трат без плагина", out)
-        self.assertIn("в плюс 1 · зря 1 · ещё 1 не в счёте (не записался расход)", out)
-        self.assertIn("последнее сжатие: ", out)
-        self.assertIn("«зря» = не окупилось", out)
+        self.assertIn("saved: +$0.05 — that's 42% of costs without the plugin", out)
+        self.assertIn("paid off 1 · wasted 1 · 1 more not counted (cost not saved)", out)
+        self.assertIn("last compaction: ", out)
+        self.assertIn("did not pay off", out)
 
     def test_empty_ledger(self):
         mod, _home = self._mod_with_home()
         out = mod._cmd_status("")
-        self.assertIn("сжатий учтено: 0", out)
-        self.assertNotIn("сэкономлено", out)
+        self.assertIn("compactions counted: 0", out)
+        self.assertNotIn("saved:", out)
 
     def test_no_gloss_without_waste(self):
         mod, home = self._mod_with_home()
@@ -133,7 +133,7 @@ class TestPanelMoney(StatusBase):
                         "facts": {"input": 1, "cache_read": 1, "output": 1, "calls": 1}})
             + "\n", encoding="utf-8")
         out = mod._cmd_status("")
-        self.assertNotIn("«зря»", out)
+        self.assertNotIn("did not pay off", out)
 
 
 class TestPanelContext(StatusBase):
@@ -149,24 +149,24 @@ class TestPanelContext(StatusBase):
     def test_remaining_line(self):
         mod, _home = self._home_with_all()
         out = mod._cmd_status("", session_id="s1")
-        self.assertIn("текущий контекст: ~10K · до сжатия ещё ~290K (порог ~300K)", out)
+        self.assertIn("current context: ~10K · ~290K left before compaction (limit ~300K)", out)
 
     def test_over_gate_line(self):
         mod, _home = self._home_with_all(chars=1200004)
         out = mod._cmd_status("", session_id="s1")
-        self.assertIn("выше порога (~300K)", out)
+        self.assertIn("over the limit (~300K)", out)
 
     def test_no_window_no_gate(self):
         mod, home = self._home_with_all()
         (home / "idle_compact_windows.json").unlink()
         out = mod._cmd_status("", session_id="s1")
-        self.assertIn("текущий контекст: ~10K", out)
-        self.assertNotIn("порог", out)
+        self.assertIn("current context: ~10K", out)
+        self.assertNotIn("limit", out)
 
     def test_no_session_no_context_line(self):
         mod, _home = self._home_with_all()
         out = mod._cmd_status("")
-        self.assertNotIn("текущий контекст", out)
+        self.assertNotIn("current context", out)
 
 
 class TestPanelWatch(StatusBase):
@@ -185,7 +185,7 @@ class TestPanelWatch(StatusBase):
     def test_own_session_watched(self):
         mod, _home = self._home_with_pending()
         out = mod._cmd_status("", session_id="s-live")
-        self.assertIn("эта сессия: сожмётся в простое", out)
+        self.assertIn("this chat: will compact while idle", out)
 
     def test_own_session_not_watched(self):
         mod, home = self._home_with_pending()
@@ -194,12 +194,12 @@ class TestPanelWatch(StatusBase):
         con.commit()
         con.close()
         out = mod._cmd_status("", session_id="s-idle")
-        self.assertIn("эта сессия: в простое не сожмётся", out)
+        self.assertIn("this chat: will not compact while idle", out)
 
     def test_no_session_counter(self):
         mod, _home = self._home_with_pending()
         out = mod._cmd_status("")
-        self.assertIn("под наблюдением: 1", out)
+        self.assertIn("waiting for idle: 1", out)
 
 
 class TestPanelReadOnly(StatusBase):
