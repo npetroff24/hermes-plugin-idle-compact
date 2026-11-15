@@ -141,13 +141,16 @@ class TestPanelMoney(StatusBase):
 
 
 class TestPanelContext(StatusBase):
-    def _home_with_all(self, chars=40000):
+    def _home_with_all(self, tokens=10000):
         mod, home = self._mod_with_home(
             "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n"
         )
-        self._db_with_session(home, chars=chars)
+        self._db_with_session(home)
         (home / "idle_compact_windows.json").write_text(
             json.dumps({"m": 1000000}), encoding="utf-8")
+        (home / "idle_compact_usage.json").write_text(
+            json.dumps({"s1": {"tokens": tokens, "ts": time.time()}}),
+            encoding="utf-8")
         return mod, home
 
     def test_remaining_line(self):
@@ -156,7 +159,7 @@ class TestPanelContext(StatusBase):
         self.assertIn("current context: ~10K · ~290K left before compaction (limit ~300K)", out)
 
     def test_over_gate_line(self):
-        mod, _home = self._home_with_all(chars=1200004)
+        mod, _home = self._home_with_all(tokens=300001)
         out = mod._cmd_status("", session_id="s1")
         self.assertIn("over the limit (~300K)", out)
 
@@ -170,6 +173,12 @@ class TestPanelContext(StatusBase):
     def test_no_session_no_context_line(self):
         mod, _home = self._home_with_all()
         out = mod._cmd_status("")
+        self.assertNotIn("current context", out)
+
+    def test_no_usage_no_context_line(self):
+        mod, home = self._home_with_all()
+        (home / "idle_compact_usage.json").unlink()
+        out = mod._cmd_status("", session_id="s1")
         self.assertNotIn("current context", out)
 
 
@@ -212,9 +221,10 @@ class TestPanelReadOnly(StatusBase):
         (home / "idle_compact_pending.json").write_text('{"a": {}}', encoding="utf-8")
         (home / "idle_compact_ledger.jsonl").write_text('{"ev": "x"}\n', encoding="utf-8")
         (home / "idle_compact_windows.json").write_text('{"m": 1}', encoding="utf-8")
+        (home / "idle_compact_usage.json").write_text('{"s1": {"tokens": 1}}', encoding="utf-8")
         before = {f: (home / f).read_bytes() for f in (
             "idle_compact_pending.json", "idle_compact_ledger.jsonl",
-            "idle_compact_windows.json")}
+            "idle_compact_windows.json", "idle_compact_usage.json")}
         mod._cmd_status("", session_id="s1")
         mod._cmd_status("debug", session_id="s1")
         for f, data in before.items():
@@ -230,15 +240,31 @@ class TestRpcStatus(StatusBase):
         self._db_with_session(home, chars=40000)
         (home / "idle_compact_windows.json").write_text(
             json.dumps({"m": 1000000}), encoding="utf-8")
+        (home / "idle_compact_usage.json").write_text(
+            json.dumps({"s1": {"tokens": 10000, "ts": time.time()}}),
+            encoding="utf-8")
         (home / "idle_compact_ledger.jsonl").write_text(
             json.dumps({"ev": "settle", "ts": 1794728400.0, "saved_usd": 0.06,
                         "baseline_usd": 0.10, "verdict": "предотвращён холодный вход",
                         "facts": {"input": 1, "cache_read": 1, "output": 1, "calls": 1}})
             + "\n", encoding="utf-8")
         res = mod._rpc_status({"session_id": "s1"})
-        self.assertEqual(res["chip"], "~10K/~300K · +$0.06")
+        self.assertEqual(res["chip"], "~290K left")
         self.assertTrue(res["panel"].startswith("idle-compact "))
         self.assertIn("saved: +$0.06", res["panel"])
+
+    def test_rpc_ready_over_gate(self):
+        mod, home = self._mod_with_home(
+            "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n"
+        )
+        self._db_with_session(home)
+        (home / "idle_compact_windows.json").write_text(
+            json.dumps({"m": 1000000}), encoding="utf-8")
+        (home / "idle_compact_usage.json").write_text(
+            json.dumps({"s1": {"tokens": 500000, "ts": time.time()}}),
+            encoding="utf-8")
+        res = mod._rpc_status({"session_id": "s1"})
+        self.assertEqual(res["chip"], "ready")
 
     def test_rpc_empty_home(self):
         mod, _home = self._mod_with_home()
@@ -263,6 +289,15 @@ class TestWindowCache(StatusBase):
         mod._note_window("", 5)
         mod._note_window("m", 0)
         self.assertEqual(mod._cached_window("m"), 1000000)
+
+    def test_usage_roundtrip(self):
+        mod, home = self._mod_with_home()
+        self.assertEqual(mod._cached_usage("s1"), 0)
+        mod._note_usage("s1", 366000)
+        self.assertEqual(mod._cached_usage("s1"), 366000)
+        mod._note_usage("", 5)
+        mod._note_usage("s1", 0)
+        self.assertEqual(mod._cached_usage("s1"), 366000)
 
 
 class TestSingleParse(StatusBase):
