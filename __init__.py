@@ -1639,7 +1639,7 @@ def _rpc_status(params=None, session_id: str | None = None, **kwargs):
         sid = params.get("session_id") or session_id
         size, gate = _panel_context(sid)
         if size is not None and gate:
-            chip = "ready" if size >= gate else f"{_fmt_k(gate - size)} left"
+            chip = "Ready" if size >= gate else f"{_fmt_k(gate - size)} left"
         else:
             chip = "idle-compact"
         panel = _cmd_status("", session_id=sid)
