@@ -1,4 +1,4 @@
-"""Задержка таймера = min(TTL модели, TTL выселения агента) x 0.9."""
+"""Задержка таймера = min(TTL модели, TTL выселения агента) минус 30 с."""
 import importlib.util
 import sys
 import tempfile
@@ -31,19 +31,19 @@ class TestEvictCap(unittest.TestCase):
     def test_default_evict_caps_deepseek(self):
         mod = self._mod_with_config("compression:\n  threshold_tokens: 100000\n")
         self.assertEqual(mod._evict_ttl(), 3600.0)
-        # min(5100, 3600) x 0.9 = 3240: раньше выселения, позже старого 2970 — честно.
-        self.assertAlmostEqual(mod._delay_for_model("deepseek-v4.1-flash"), 3240.0)
+        # min(5100, 3600) - 30 = 3570: раньше выселения, позже старого 3240.
+        self.assertAlmostEqual(mod._delay_for_model("deepseek-v4.1-flash"), 3570.0)
 
     def test_raised_evict_unlocks_deepseek(self):
         mod = self._mod_with_config("agent:\n  agent_cache:\n    idle_ttl_secs: 5400\n")
         self.assertEqual(mod._evict_ttl(), 5400.0)
-        # min(5100, 5400) x 0.9 = 4590: полный TTL провайдера.
-        self.assertAlmostEqual(mod._delay_for_model("deepseek-v4.1-flash"), 4590.0)
+        # min(5100, 5400) - 30 = 5070: полный TTL провайдера минус запас.
+        self.assertAlmostEqual(mod._delay_for_model("deepseek-v4.1-flash"), 5070.0)
 
     def test_short_models_unaffected(self):
         mod = self._mod_with_config("agent:\n  agent_cache:\n    idle_ttl_secs: 5400\n")
-        # min(600, 5400) x 0.9 = 540: короткие модели не меняются.
-        self.assertAlmostEqual(mod._delay_for_model("muse-spark-1.3-contributor"), 540.0)
+        # min(600, 5400) - 30 = 570.
+        self.assertAlmostEqual(mod._delay_for_model("muse-spark-1.3-contributor"), 570.0)
 
     def test_broken_config_falls_back(self):
         mod = self._mod_with_config("agent: [unclosed\n")

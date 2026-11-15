@@ -240,6 +240,28 @@ class TestLifecycle(unittest.TestCase):
         savings.end_compaction("sess-2", 100_000)
         self.assertEqual(savings.session_summary("sess-2"), {})
 
+    def test_verdict_uses_full_idle_not_post_gap(self):
+        """Вернулись через 160 с после сжатия, но простой от хода — 700 с > TTL."""
+        import time as _time
+
+        sid = "sess-full"
+        now = _time.time()
+        savings.begin_compaction(sid, "muse-spark-1.3-contributor", 200_000,
+                                 idle_since=now - 700)
+        savings.end_compaction(sid, after_tokens=50_000,
+                               warm_usage={"input": 100, "cache_read": 199000,
+                                           "output_tokens": 500})
+        pend = savings._state[sid]["pending"]
+        savings.on_post_api_request(session_id=sid, started_at=pend["ts"] + 160,
+                                    usage={"input_tokens": 1000, "cache_read_tokens": 49000})
+        lines = [json.loads(x) for x in self.ledger.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(lines), 1)
+        ev = lines[0]
+        self.assertIn("холодный", ev["verdict"])
+        self.assertEqual(ev["algo"], 2)
+        self.assertGreater(ev["baseline_usd"], 0)
+        self.assertGreaterEqual(ev["full_gap_s"], 700)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

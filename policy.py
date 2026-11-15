@@ -28,7 +28,7 @@ __all__ = [
     "watchdog_grace",
 ]
 
-# Запас до истечения кеша: работаем на 90% TTL, чтобы успеть до его конца.
+# Доля TTL для свежести захвата (arm_window_for): повтор старше — бессмысленен.
 TTL_FACTOR = 0.9
 
 # Таймаут одного запроса суммаризации, секунды. Живое сжатие длится дольше
@@ -60,9 +60,17 @@ def capture_max_age_for(model: str) -> float:
     return float(ttl_for_model(model))
 
 
+# Запас таймера до смерти кеша, секунды: выстрел идёт за SCHEDULE_MARGIN_S
+# до истечения TTL. Абсолютный запас, а не доля: важен момент ПРИХОДА
+# replay-запроса (lookup кеша), а не финиш всего сжатия — 30 с покрывают
+# джиттер планировщика и сеть, а на коротких TTL не вырождаются в рулетку
+# (×0.9 от 60 с давал бы 6 с запаса).
+SCHEDULE_MARGIN_S = 30.0
+
+
 def schedule_delay_for(model: str, evict_ttl: float) -> float:
-    """Пауза планировщика: сжимаем, пока живы и кеш, и агент в памяти гейтвея."""
-    return float(min(ttl_for_model(model), evict_ttl)) * TTL_FACTOR
+    """Пауза планировщика: min(TTL кеша, TTL выселения агента) минус запас."""
+    return float(min(ttl_for_model(model), evict_ttl)) - SCHEDULE_MARGIN_S
 
 
 def watchdog_grace(delay: float) -> float:

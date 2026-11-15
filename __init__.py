@@ -2,7 +2,7 @@
 
 Логика:
 - после каждого хода (хук on_session_end) ставим/сбрасываем таймер сессии:
-  delay = TTL(модель) x 0.9 (таблица TTL_BY_MODEL_SUBSTR + замер/дефолт);
+  delay = min(TTL модели, TTL выселения) − 30 с (таблица TTL_BY_MODEL_SUBSTR);
 - таймер сработал: сессия всё ещё тиха, источник не машинный, размер > гейта —
   сжимаем ядром (штатный путь) с warm-суммированием по кешу;
 - гейт = цель x 2, цель = threshold_tokens x target_ratio
@@ -501,6 +501,48 @@ def _save_pending(state: dict[str, dict]) -> None:
         logger.exception("idle-compact: pending state write failed")
 
 
+def _windows_path():
+    return _home() / "idle_compact_windows.json"
+
+
+def _note_window(model: str, window: int) -> None:
+    """Запомнить фактическое окно модели (видели у живого компрессора).
+
+    Окна не меняются со временем — перезаписываем без TTL. Нужно панели:
+    порог в токенах = доля × окно, а живого компрессора под рукой может не быть.
+    """
+    try:
+        window = int(window or 0)
+        model = str(model or "").strip()
+        if window <= 0 or not model:
+            return
+        import json
+
+        path = _windows_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data = data if isinstance(data, dict) else {}
+        except Exception:
+            data = {}
+        if data.get(model) == window:
+            return
+        data[model] = window
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        logger.debug("idle-compact: window cache write failed", exc_info=True)
+
+
+def _cached_window(model: str) -> int:
+    """Окно модели из кеша. Не видели — 0. Только чтение."""
+    try:
+        import json
+
+        data = json.loads(_windows_path().read_text(encoding="utf-8"))
+        return int((data or {}).get(str(model or "")) or 0)
+    except Exception:
+        return 0
+
+
 def _pid_alive(pid: int) -> bool:
     """Жив ли процесс-владелец дедлайна (POSIX и Windows)."""
     if pid <= 0:
@@ -742,6 +784,7 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
         runner_live = None
         if res is not None:
             agent_live, comp, route_live, runner_live = res
+            _note_window(model, getattr(comp, "context_length", 0))
             floor = _gate_floor(comp, session_id)
             if floor is not None:
                 # Реальный размер последнего промпта из usage API: оценка по
@@ -776,7 +819,7 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
         # -- боевое сжатие: allowlist как опциональный ограничитель --
         if WRITE_ENABLED and (not ALLOWLIST or session_id in ALLOWLIST):
             _do_compress(session_id, model, size, ctx, agent=agent_live,
-                         route=route_live, runner=runner_live)
+                         route=route_live, runner=runner_live, idle_since=stamp)
             return
         logger.info("idle-compact: write path not yet enabled, skip %s", session_id)
     except Exception:
@@ -833,6 +876,7 @@ def _arm_engine(session_id: str) -> None:
     begin = getattr(comp, "begin_warm", None)
     if not callable(begin):
         return
+    _note_window(cap.get("model") or getattr(agent, "model", ""), getattr(comp, "context_length", 0))
     route = {
         "api_mode": cap.get("api_mode") or getattr(agent, "api_mode", ""),
         "base_url": cap.get("base_url") or getattr(agent, "base_url", ""),
@@ -922,7 +966,7 @@ def _gate_floor(compressor, session_id: str | None = None) -> int | None:
 
 
 def _do_compress(session_id: str, model: str, size: int, ctx, agent=None,
-                 route: str = "", runner=None) -> None:
+                 route: str = "", runner=None, idle_since: float | None = None) -> None:
     """Боевое сжатие через resident-агента: весь коммит делает ядро.
 
     ``agent`` приходит из ``_resident`` — он уже нашёл живого агента (в том
@@ -1007,7 +1051,7 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None,
         session_id, model, exact)
     try:
         from . import savings
-        savings.begin_compaction(session_id, model, exact)
+        savings.begin_compaction(session_id, model, exact, idle_since=idle_since)
     except Exception:
         logger.exception("idle-compact: savings begin failed")
 
@@ -1440,8 +1484,10 @@ def _pending_live(now: float | None = None) -> tuple[list, int]:
 def _ledger_stats() -> dict | None:
     """Агрегат леджера за всё время. Только чтение, O(размер файла).
 
-    Деньги знаковые: ``saved_usd`` положителен, когда сжатие окупилось,
-    и отрицателен, когда кеш и так был бы тёплым («зря»).
+    В зачёт идут события с измеренным расходом (facts ненулевые) и записанным
+    ``baseline_usd``. Без расхода — «не в счёте» (экономия завышена на цену
+    сжатия); без базлайна — прежняя формула (до бэкфилла), только в debug.
+    Деньги знаковые: плюс — окупилось, минус — «зря».
     """
     try:
         import json
@@ -1452,9 +1498,10 @@ def _ledger_stats() -> dict | None:
         text = path.read_text(encoding="utf-8") if path.exists() else ""
     except Exception:
         return None
-    plus_n = waste_n = n = 0
-    plus = waste = 0.0
-    last_settle = 0.0
+    plus_n = waste_n = unmeasured_n = legacy_n = n = 0
+    cold_n = warm_n = 0
+    plus = waste = base = 0.0
+    last_ts = 0.0
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -1463,100 +1510,216 @@ def _ledger_stats() -> dict | None:
             event = json.loads(line)
         except Exception:
             continue
+        if not isinstance(event, dict):
+            continue
         n += 1
+        try:
+            ts = float(event.get("ts") or 0)
+        except Exception:
+            ts = 0.0
+        if ts > last_ts:
+            last_ts = ts
+        if (event.get("verdict") or "") == "кеш был бы тёплым":
+            warm_n += 1
+        else:
+            cold_n += 1
+        try:
+            baseline = float(event.get("baseline_usd") or 0)
+        except Exception:
+            baseline = 0.0
+        if baseline <= 0:
+            legacy_n += 1
+            continue
+        facts = event.get("facts") or {}
+        try:
+            measured = (int(facts.get("input") or 0) > 0
+                        or int(facts.get("cache_read") or 0) > 0
+                        or int(facts.get("output") or 0) > 0)
+        except Exception:
+            measured = False
+        if not measured:
+            unmeasured_n += 1
+            continue
         try:
             amount = float(event.get("saved_usd") or 0)
         except Exception:
             amount = 0.0
+        base += baseline
         if amount > 0:
             plus_n += 1
             plus += amount
         elif amount < 0:
             waste_n += 1
             waste += amount
-        if event.get("event") == "settle":
-            try:
-                ts = float(event.get("ts") or 0)
-            except Exception:
-                ts = 0.0
-            if ts > last_settle:
-                last_settle = ts
     return {
         "events": n, "plus_n": plus_n, "plus": plus,
         "waste_n": waste_n, "waste": waste, "net": plus + waste,
-        "last_settle": last_settle,
+        "base": base, "unmeasured_n": unmeasured_n, "legacy_n": legacy_n,
+        "cold_n": cold_n, "warm_n": warm_n, "last_ts": last_ts,
     }
+
+
+def _fmt_k(tokens: int) -> str:
+    """Токены коротко: 42245 → «~42K», 850 → «~850»."""
+    try:
+        tokens = int(tokens)
+    except Exception:
+        return "?"
+    if tokens < 1000:
+        return f"~{tokens}"
+    return f"~{round(tokens / 1000)}K"
+
+
+def _fmt_money(amount: float) -> str:
+    """Деньги в центах со знаком: +$0.13, -$0.06."""
+    try:
+        value = float(amount)
+        return f"{'+' if value >= 0 else '-'}${abs(value):.2f}"
+    except Exception:
+        return "?"
 
 
 def _cmd_status(raw_args: str = "", session_id: str | None = None) -> str:
     """Хендлер ``/idle-compact``: панель статуса. Строго read-only.
 
-    Правда — из файлов (pending, леджер); память этого процесса помечена
-    явно. Ничего не создаёт: ни таймеров, ни записей, ни сессий.
+    Порядок — от полезного к служебному: деньги → разбивка → контекст
+    и порог → наблюдение → диагностика (только ``/idle-compact debug``).
+    Нет данных — нет строки: «unknown» не показываем.
     """
+    if str(raw_args or "").strip().lower() == "debug":
+        return _cmd_debug(session_id=session_id)
     lines = [f"idle-compact {_STATUS_VERSION}"]
+    stats = _ledger_stats()
+    if stats is None or stats["events"] <= 0:
+        lines.append("сжатий учтено: 0")
+    else:
+        money = f"сэкономлено: {_fmt_money(stats['net'])}"
+        if stats["base"] > 0:
+            pct = int(round(100 * stats["net"] / stats["base"]))
+            money += f" — это {pct}% трат без плагина"
+        lines.append(money)
+        brk = f"в плюс {stats['plus_n']} · зря {stats['waste_n']}"
+        if stats["unmeasured_n"] > 0:
+            brk += f" · ещё {stats['unmeasured_n']} не в счёте (не записался расход)"
+        lines.append(brk)
+        if stats["last_ts"] > 0:
+            lines.append(f"последнее сжатие: {_fmt_ts(stats['last_ts'])}")
+    size, gate = _panel_context(session_id)
+    if size is not None:
+        ctx = f"текущий контекст: {_fmt_k(size)}"
+        if gate:
+            if size >= gate:
+                ctx += f" · выше порога ({_fmt_k(gate)})"
+            else:
+                ctx += f" · до сжатия ещё {_fmt_k(gate - size)} (порог {_fmt_k(gate)})"
+        lines.append(ctx)
+    watch = _panel_watch(session_id)
+    if watch:
+        lines.append(watch)
+    if stats is not None and stats["waste_n"] > 0:
+        lines.append("«зря» = не окупилось (обычно: вернулись раньше смерти кеша)")
+    return "\n".join(lines)
+
+
+def _fmt_ts(ts: float) -> str:
+    try:
+        from datetime import datetime
+
+        return datetime.fromtimestamp(float(ts)).strftime("%d.%m %H:%M")
+    except Exception:
+        return "?"
+
+
+def _panel_context(session_id: str | None) -> tuple[int | None, int | None]:
+    """(текущий размер, порог в токенах) для панели. Нет данных — None."""
+    if not session_id:
+        return None, None
+    try:
+        size = _rough_tokens(session_id)
+    except Exception:
+        return None, None
+    gate = None
+    try:
+        from types import SimpleNamespace
+
+        cfg = _read_config()
+        model = ""
+        try:
+            row = _session_row(session_id)
+            model = (row or {}).get("model") or ""
+        except Exception:
+            model = ""
+        window = _cached_window(model) if model else 0
+        comp = SimpleNamespace(context_length=window)
+        gate = _live_gate(comp, session_id, cfg)
+    except Exception:
+        gate = None
+    return size, gate
+
+
+def _panel_watch(session_id: str | None) -> str:
+    """Строка наблюдения: для своей сессии — персонально, иначе — счётчик."""
+    try:
+        live, _total = _pending_live()
+    except Exception:
+        return ""
+    if session_id:
+        if session_id in live:
+            return "эта сессия: сожмётся в простое"
+        return "эта сессия: в простое не сожмётся"
+    if live:
+        return f"под наблюдением: {len(live)}"
+    return ""
+
+
+def _cmd_debug(session_id: str | None = None) -> str:
+    """``/idle-compact debug``: внутренности для разбора полётов."""
+    lines = [f"idle-compact {_STATUS_VERSION} · debug"]
     try:
         engine = "да" if _WARM_ENGINE is not None else "нет"
     except Exception:
-        engine = "unknown"
-    lines.append(f"warm-движок: {engine} (этот процесс)")
+        engine = "?"
     try:
         with _timers_lock:
             timers = len(_timers)
-        lines.append(f"таймеры: {timers} (этот процесс)")
     except Exception:
-        lines.append("таймеры: unknown (этот процесс)")
+        timers = "?"
+    lines.append(f"тёплое сжатие: {engine} · таймеры процесса: {timers} (pid {os.getpid()})")
     try:
-        live, total = _pending_live()
-        lines.append(f"наблюдение (файл): {len(live)} живых из {total}")
+        cfg = _read_config()
+        frac = _gate_fraction(session_id, cfg)
     except Exception:
-        lines.append("наблюдение (файл): unknown")
-    try:
-        cpanel = _read_config()
-        gate = _live_gate(session_id=session_id, cfg=cpanel)
-    except Exception:
-        gate = None
-        cpanel = None
-    if gate:
-        lines.append(f"порог: ~{gate} токенов")
-    else:
-        try:
-            frac = _gate_fraction(session_id, cpanel)
-        except Exception:
-            frac = 0.0
-        if frac > 0:
-            lines.append(f"порог: {frac:g} окна модели (окно неизвестно)")
-        else:
-            lines.append("порог: n/a")
+        frac, cfg = 0.0, None
+    model, window = "", 0
     if session_id:
         try:
-            lines.append(f"сейчас: ~{_rough_tokens(session_id)} токенов")
+            row = _session_row(session_id)
+            model = (row or {}).get("model") or ""
         except Exception:
-            lines.append("сейчас: unknown")
-    else:
-        lines.append("сейчас: unknown (нет сессии)")
+            model = ""
+        if model:
+            window = _cached_window(model)
+    _size, gate = _panel_context(session_id)
+    lines.append(
+        f"порог: доля {frac:g} · окно {model or '?'}={window or '?'} (кеш) · "
+        f"токены {gate if gate else '?'}"
+    )
     stats = _ledger_stats()
     if stats is None:
-        lines.append("счёт: unknown")
+        lines.append("леджер: не читается")
     else:
         lines.append(
-            "счёт: событий %(events)d, в плюс %(plus_n)d (+$%(plus).5f), "
-            "зря %(waste_n)d (-$%(waste_abs).5f), итог $%(net)+.5f" % {
-                "events": stats["events"], "plus_n": stats["plus_n"],
-                "plus": stats["plus"], "waste_n": stats["waste_n"],
-                "waste_abs": abs(stats["waste"]), "net": stats["net"],
-            }
+            f"вердикты: холодных {stats['cold_n']} · тёплых {stats['warm_n']}"
         )
-        if stats["last_settle"] > 0:
-            try:
-                from datetime import datetime
-
-                when = datetime.fromtimestamp(stats["last_settle"]).strftime("%d.%m %H:%M")
-            except Exception:
-                when = "unknown"
-            lines.append(f"последний счёт: {when}")
-        else:
-            lines.append("последний счёт: пока нет (сжатие попадёт в счёт после первого живого хода)")
+        lines.append(
+            f"деньги точно: +${stats['plus']:.5f} ${stats['waste']:.5f} = "
+            f"${stats['net']:+.5f} · базлайн ${stats['base']:.5f}"
+        )
+        if stats["unmeasured_n"] > 0 or stats["legacy_n"] > 0:
+            lines.append(
+                f"вне счёта: без расхода {stats['unmeasured_n']} · "
+                f"прежней формулой {stats['legacy_n']}"
+            )
     return "\n".join(lines)
 
 

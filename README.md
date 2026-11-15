@@ -39,9 +39,9 @@ reasoning are unaffected.
 
 ## How it works
 
-1. After every turn — a timer at 90% of cache lifetime: spark/gpt/gemini →
-   540 s, the rest → 270 s. DeepSeek cache lives 85 min, but Hermes evicts
-   the chat from memory after 60 min — so the timer fires at ~54 min.
+1. After every turn — a timer 30 s short of cache lifetime: spark/gpt/gemini →
+   570 s, the rest → 270 s. DeepSeek cache lives 85 min, but Hermes evicts
+   the chat from memory after 60 min — so the timer fires at ~59 min.
    To use the full lifetime, raise the limit with one config block:
 
    ```yaml
@@ -89,8 +89,8 @@ hermes config set context.engine idle_warm
 By default, auto-compression kicks in once the context passes the
 core compression target × 2.
 
-How it works: every message starts a timer — 90% of the model
-cache TTL. A new message resets the countdown. Idle through the
+How it works: every message starts a timer — the model
+cache TTL minus 30 seconds. A new message resets the countdown. Idle through the
 whole timer with the context above the gate — compaction runs in
 the background. You come back to an already-slim chat.
 
@@ -106,8 +106,8 @@ hermes config set plugins.idle_compact.gate_fraction 0.2
 Works on Windows and Linux.
 
 Check status any time with `/idle-compact` in chat (read-only):
-engine and timers in this process, live watches, gate vs current
-size, and the signed savings ledger.
+money saved, ledger breakdown, current size vs gate, watch state.
+`/idle-compact debug` shows internals (engine, timers, exact figures).
 
 ## Rollback
 
@@ -186,10 +186,10 @@ tools и reasoning не ломаются.
 
 ## Логика
 
-1. После каждого хода — таймер на 90% срока жизни кеша: spark/gpt/gemini →
-   540 сек, остальные → 270 сек. У дипсика кеш живёт 85 мин, но Hermes
+1. После каждого хода — таймер за 30 сек до смерти кеша: spark/gpt/gemini →
+   570 сек, остальные → 270 сек. У дипсика кеш живёт 85 мин, но Hermes
    выгоняет чат из памяти через 60 мин — поэтому таймер срабатывает
-   на 54-й минуте. Чтобы использовать полный срок, поднимите лимит
+   на 59-й минуте. Чтобы использовать полный срок, поднимите лимит
    строкой в конфиге:
 
    ```yaml
@@ -237,8 +237,8 @@ hermes config set context.engine idle_warm
 По умолчанию автокомпрессия активируется когда контекст переваливает
 за цель сжатия ядра × 2.
 
-Как это работает: после каждого сообщения — таймер 90% времени жизни
-кеша. Новое сообщение сбрасывает отсчёт. Досидели в тишине, контекст
+Как это работает: после каждого сообщения — таймер: время жизни
+кеша минус 30 секунд. Новое сообщение сбрасывает отсчёт. Досидели в тишине, контекст
 больше гейта — сжатие в фоне. Вернулся — чат уже ужатый.
 
 Опционально: свой порог как доля окна модели — 0.2 означает
@@ -253,8 +253,8 @@ hermes config set plugins.idle_compact.gate_fraction 0.2
 Работает на Windows и Linux.
 
 Состояние — командой `/idle-compact` в чате (только чтение):
-движок и таймеры этого процесса, живое наблюдение, порог против
-текущего размера и учёт экономии со знаком (в плюс / зря).
+сэкономленные деньги, разбивка, текущий контекст против порога, наблюдение.
+`/idle-compact debug` — внутренности (движок, таймеры, точные цифры).
 
 ## Откат
 
