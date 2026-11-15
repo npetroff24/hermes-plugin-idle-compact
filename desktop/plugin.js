@@ -72,7 +72,8 @@ function Chip({ data }) {
         title: 'idle-compact'
       })
     } catch (e) {
-      host.notify({ durationMs: TOAST_MS, kind: 'error', message: 'idle-compact: status unavailable', title: 'idle-compact' })
+      const detail = (e && (e.message || e.data || e.code)) || e
+      host.notify({ durationMs: TOAST_MS, kind: 'error', message: `idle-compact: ${String(detail)}`, title: 'idle-compact' })
     }
   }
 
