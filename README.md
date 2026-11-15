@@ -15,15 +15,17 @@ completely — your next turn re-reads the whole context at full price.
 1. **No waiting when it finishes idle.** Compacts ahead of time, while idle —
    if compaction completes before you return, the next message never waits for it.
 2. **Cache-warm, not cache-blind.** The summary request repeats your last turn
-   and hits prompt-cache at 92.6–97.5% in three measurements instead of ~0% —
-   the compaction itself costs pennies.
-3. **Timing per model.** Every model has its own cache TTL: DeepSeek ~85 min,
-   Spark/GPT/Gemini ~10 min, Claude/Kimi/Qwen/MiniMax and the rest ~5 min.
-   Starts at 10% before expiry (TTL × 0.9). One caveat: Hermes evicts idle
+   and hits prompt-cache at ~99.8% instead of ~0% — about **5.4× cheaper**
+   (see Stock vs plugin).
+3. **Timing per model.** Fires at 10% before cache expiry (TTL × 0.9).
+   Measured on our traffic: DeepSeek ~85 min, Spark ~10 min. Documented
+   by vendors: Claude, Kimi — 5 min. The rest is a conservative default
+   (5 min; GPT/Gemini 10 min). One caveat: Hermes evicts idle
    chats after 60 min, so DeepSeek effectively fires at ~54 min
    (see How it works).
 4. **Skips the small stuff.** The gate is a share of the model window
-   (default 0.2, set it in the Plugins hub) — short chats are skipped,
+   (suggested 0.2 in the Plugins hub; until you save, core target × 2) —
+   short chats are skipped,
    nothing wasted.
 5. **Money is visible.** Every compaction logs SAVINGS: before → after, cost;
    on your return — whether the entry was warm or cold and what was actually
@@ -36,14 +38,16 @@ completely — your next turn re-reads the whole context at full price.
 Bottom line: smaller context — cheaper every answer, no waiting when idle
 compaction finishes in time, every number in the log.
 
-## Warm-path measurements (2026-10-29, opencode-go, live requests)
+## Stock vs plugin (measured)
 
-| model | transport | cache_read | fresh input | cache hit |
-|---|---|---|---|---|
-| muse-spark-1.3-contributor | codex_responses | 1393 | 83 | 94% |
-| deepseek-v4.1-flash | chat_completions | 1792 | 46 | 97.5% |
-| minimax-m3.1-flash | anthropic_messages | 1920 | 153 | 92.6% |
+| | Stock compression | idle-compact |
+|---|---|---|
+| Your wait | ~3 min mid-answer (p50 184 s, [#117886](https://github.com/NousResearch/hermes-agent/issues/117886)) | 0 — compacts in the background (a pass takes 18–22 s off the critical path) |
+| Cache use | cold: cache_read = 0 | ~99.8% from cache (130 432 cached / 280 fresh) |
+| Price | $0.0188 per ~60K tokens | $0.0035 per ~64K tokens — **≈5.4× cheaper** |
 
+Wait from #117886 (gateway session); cache and prices from our provider
+dashboard and logs, 2026-11-13, opencode-go relay.
 Summaries stay structural (Goal / Current state / Next step); tools and
 reasoning are unaffected.
 
@@ -66,18 +70,19 @@ reasoning are unaffected.
    or the core compression target × 2 when nothing is saved.
 3. The plugin grabs the last real request (`pre_api_request` hook) and enables
    the warm path on its own context engine.
-4. The core does the compaction (`resident._compress_context`): locks,
+4. The core does the compaction (its own `_compress_context`): locks,
    cooldown, anti-thrash, watermark against races. The plugin only swaps the
    summary LLM call — all middle-replacement logic stays core.
 5. Warm unavailable (no capture, route changed, error) — automatic fallback to
    the stock aux path.
-6. Small/young/cron sessions are left alone.
+6. Small sessions and machine sessions (cron, subagents, oneshot…) are left alone.
 
 ## Custom context engine
 
 The plugin registers `idle_warm` — a subclass of the stock `ContextCompressor`
 overriding a single method, `_call_summary_llm`. Nothing in the core is
-patched: plain subclassing of a public class.
+patched — plain subclassing — but that override point is not a public API
+yet; the catalog listing waits on the core seam (#97390).
 
 If the core changes that method's signature, the plugin disables warm and keeps
 working via aux (`inspect.signature` check at startup).
@@ -91,7 +96,7 @@ hermes config set context.engine idle_warm
 ## Install
 
 ```bash
-hermes plugins install <git-url> --enable
+hermes plugins install https://github.com/npetroff24/hermes-plugin-idle-compact --enable
 hermes config set context.engine idle_warm
 ```
 
@@ -119,6 +124,8 @@ hermes config set context.engine compressor
 hermes plugins disable idle-compact
 # one-time cleanup of leftover state from ≤0.9.17
 rm ~/.hermes/idle_compact_pending.json ~/.hermes/idle_*.json
+# Windows (PowerShell):
+# Remove-Item "$env:LOCALAPPDATA\\hermes\\idle_compact_pending.json", "$env:LOCALAPPDATA\\hermes\\idle_*.json"
 ```
 
 Compaction archives rows (`active=0`), never deletes.
@@ -140,6 +147,8 @@ Compaction archives rows (`active=0`), never deletes.
 - Background work: per-session timers plus a ~30s daemon sweep thread;
   state lives in `idle_compact_pending.json` and `idle_*.json` under the
   Hermes home directory (`%LOCALAPPDATA%\hermes` on Windows, `~/.hermes` elsewhere).
+- Redirects: the warm request never follows them — any 3xx is refused, so the
+  provider key can't leak to another host on a cross-host redirect.
 - No telemetry or usage reporting.
 
 ---
@@ -162,14 +171,17 @@ Compaction archives rows (`active=0`), never deletes.
 1. **Ноль ожидания, если успело.** Сжимает заранее, в простое — если сжатие
    завершилось до вашего возвращения, ждать его не придётся.
 2. **Сжатие по кешу, а не мимо.** Запрос суммирования повторяет последний ход
-   и попадает в prompt-cache на 92.6–97.5% в трёх замерах вместо ~0% — само сжатие стоит копейки.
-3. **Момент подбирает сам.** У каждой модели свой TTL кеша: DeepSeek ~85 мин,
-   Spark/GPT/Gemini ~10 мин, Claude/Kimi/Qwen/MiniMax и остальные ~5 мин.
-   Старт за 10% до протухания (TTL × 0.9). Нюанс: Hermes выгоняет чат
+   и попадает в prompt-cache на ~99.8% вместо ~0% — примерно **в 5.4 раза дешевле**
+   (см. Штатное и наше).
+3. **Момент подбирает сам.** Старт за 10% до протухания кеша (TTL × 0.9).
+   Замерено на нашем трафике: DeepSeek ~85 мин, Spark ~10 мин.
+   Документировано вендорами: Claude, Kimi — 5 мин. Остальное —
+   консервативный дефолт (5 мин; GPT/Gemini 10 мин). Нюанс: Hermes выгоняет чат
    из памяти через 60 мин, поэтому дипсик срабатывает на 54-й минуте
    (подробности — в Логике).
-4. **Мелочь не жмёт.** Порог — доля окна модели (дефолт 0.2, меняется
-   в хабе плагинов) — короткие чаты пропускаются, ничего не тратится.
+4. **Мелочь не жмёт.** Порог — доля окна модели (в хабе плагинов
+   подсказано 0.2; пока не сохранили — цель ядра × 2) — короткие чаты
+   пропускаются, ничего не тратится.
 5. **Деньги видны.** После каждого сжатия пишет SAVINGS: было → стало, цена;
    на вашем возврате — тёплым или холодным был вход и сколько реально
    сэкономлено.
@@ -181,14 +193,16 @@ Compaction archives rows (`active=0`), never deletes.
 Итого: меньше контекст — дешевле каждый ответ, без ожидания, если сжатие успело на простое, каждая
 цифра в логе.
 
-## Замеры warm-пути (29.10.2026, opencode-go, живые запросы)
+## Штатное и наше (замеры)
 
-| модель | транспорт | cache_read | свежий вход | кеш |
-|---|---|---|---|---|
-| muse-spark-1.3-contributor | codex_responses | 1393 | 83 | 94% |
-| deepseek-v4.1-flash | chat_completions | 1792 | 46 | 97.5% |
-| minimax-m3.1-flash | anthropic_messages | 1920 | 153 | 92.6% |
+| | Штатное сжатие | idle-compact |
+|---|---|---|
+| Ваше ожидание | ~3 мин посреди ответа (p50 184 с, [#117886](https://github.com/NousResearch/hermes-agent/issues/117886)) | 0 — жмёт в фоне (проход 18–22 с вне ответа) |
+| Кеш | вхолодную: cache_read = 0 | ~99.8% из кеша (130 432 из кеша / 280 свежих) |
+| Цена | $0.0188 за ~60K токенов | $0.0035 за ~64K токенов — **примерно в 5.4 раза дешевле** |
 
+Ожидание — из #117886 (сессия шлюза); кеш и цены — наш дашборд
+провайдера и логи, 13.11.2026, релей opencode-go.
 Саммари при этом остаётся структурным (Goal / Current state / Next step),
 tools и reasoning не ломаются.
 
@@ -212,18 +226,19 @@ tools и reasoning не ломаются.
    сжатия ядра × 2, если ничего не сохранено.
 3. Плагин захватывает последний реальный запрос (хук `pre_api_request`) и
    включает warm-путь на своём контекст-движке.
-4. Сжатие делает ядро (`resident._compress_context`): локи, cooldown,
+4. Сжатие делает ядро (свой `_compress_context`): локи, cooldown,
    anti-thrash, watermark против гонок. Плагин подменяет только LLM-вызов
    суммирования — вся логика замены середины остаётся ядровой.
 5. Warm недоступен (нет захвата, сменился маршрут, ошибка) — автоматический
    откат на штатный aux-путь.
-6. Маленькие/молодые/cron-сессии не трогаются.
+6. Маленькие сессии и машинные (cron, субагенты, oneshot…) не трогаются.
 
 ## Свой контекст-движок
 
 Плагин регистрирует `idle_warm` — наследник штатного `ContextCompressor`,
 который переопределяет единственный метод `_call_summary_llm`. Ничего в ядре
-не патчится: обычное наследование публичного класса.
+не патчится — обычное наследование, — но эта точка переопределения пока
+не публичный API; листинг в каталоге ждёт шов в ядре (#97390).
 
 Если ядро сменит сигнатуру этого метода, плагин отключит warm и продолжит
 работать через aux (проверка `inspect.signature` на старте).
@@ -237,7 +252,7 @@ hermes config set context.engine idle_warm
 ## Установка
 
 ```bash
-hermes plugins install <git-url> --enable
+hermes plugins install https://github.com/npetroff24/hermes-plugin-idle-compact --enable
 hermes config set context.engine idle_warm
 ```
 
@@ -264,6 +279,8 @@ hermes config set context.engine compressor
 hermes plugins disable idle-compact
 # разовая чистка остатков от версий ≤0.9.17
 rm ~/.hermes/idle_compact_pending.json ~/.hermes/idle_*.json
+# Windows (PowerShell):
+# Remove-Item "$env:LOCALAPPDATA\\hermes\\idle_compact_pending.json", "$env:LOCALAPPDATA\\hermes\\idle_*.json"
 ```
 
 Сжатие архивирует строки (`active=0`), не удаляет.
