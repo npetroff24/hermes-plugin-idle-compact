@@ -1579,6 +1579,31 @@ def _fmt_money(amount: float) -> str:
         return "?"
 
 
+def _rpc_status(params=None, session_id: str | None = None, **kwargs):
+    """RPC ``plugin.idle-compact.status`` для десктопной половины.
+
+    Возвращает JSON: короткая строка чипа + полная панель тоста.
+    Сессия — из params (активная вкладка) или из контекста вызова.
+    """
+    try:
+        params = params or {}
+        sid = params.get("session_id") or session_id
+        size, gate = _panel_context(sid)
+        stats = _ledger_stats()
+        chip_bits = []
+        if size is not None and gate:
+            chip_bits.append(f"{_fmt_k(size)}/{_fmt_k(gate)}")
+        elif size is not None:
+            chip_bits.append(f"{_fmt_k(size)}")
+        if stats is not None and stats["events"] > 0:
+            chip_bits.append(_fmt_money(stats["net"]))
+        chip = " · ".join(chip_bits) if chip_bits else "idle-compact"
+        panel = _cmd_status("", session_id=sid)
+        return {"chip": chip, "panel": panel}
+    except Exception as exc:
+        return {"chip": "idle-compact", "panel": f"idle-compact: status failed ({exc})"}
+
+
 def _cmd_status(raw_args: str = "", session_id: str | None = None) -> str:
     """Хендлер ``/idle-compact``: панель статуса. Строго read-only.
 
@@ -1796,6 +1821,12 @@ def register(ctx) -> None:
                     description="idle-compact: plugin status (read-only)")
     except Exception:
         logger.debug("idle-compact: command registration skipped", exc_info=True)
+    try:
+        reg_rpc = getattr(ctx, "register_rpc", None)
+        if callable(reg_rpc):
+            reg_rpc("status", _rpc_status)
+    except Exception:
+        logger.debug("idle-compact: rpc registration skipped", exc_info=True)
     logger.info(
         "idle-compact %s loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         _plugin_version(), DRY_RUN, WRITE_ENABLED,
