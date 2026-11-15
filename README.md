@@ -116,7 +116,9 @@ base-class signature.
 Desktop also shows a status-bar chip (`~185K left`, or `Ready`
 past the gate); click it for the full panel as a popup.
 The chip updates by push after every turn, so it also works over SSH,
-where direct RPC answers `-32601`.
+where direct RPC answers `-32601`. Status rides the session event stream —
+the same channel as chat messages — with a global broadcast as fallback.
+Switching chats resets the chip instead of showing stale numbers.
 
 ## Rollback
 
@@ -270,7 +272,9 @@ hermes config set plugins.idle_compact.gate_fraction 0.2
 (новое ядро) — ветка выбирается по живой сигнатуре базового класса.
 В десктопе — чип в статус-баре (`~185K left`, выше порога `Ready`); клик —
 полная панель всплывашкой. Чип обновляется push'ем после каждого хода,
-поэтому работает и по SSH, где прямой RPC отвечает `-32601`.
+поэтому работает и по SSH, где прямой RPC отвечает `-32601`. Статус едет
+событием на канале сессии — том же, что сообщения чата, — с глобальным
+broadcast как запаской. Смена чата сбрасывает чип, а не показывает чужие цифры.
 
 ## Откат
 

@@ -878,16 +878,15 @@ _post_api_seen: set[str] = set()
 
 
 def _push_status(session_id: str) -> None:
-    """Отправить чип+панель глобальным событием.
+    """Отправить чип+панель событием на канал сессии.
 
-    RPC (`host.request`) доходит только до gateway-маршрута: `serve`
-    (Desktop по SSH) отвечает `-32601`. Глобальные события идут другим
-    каналом (`_live_transports`) и доходят до всех окон, включая serve.
-    Поэтому чип едет push'ем на каждом ходу, а RPC остаётся запасным
-    путём для клика до первого события.
+    Session-события идут тем же каналом, что сообщения чата, — он точно
+    доходит до десктопа, включая SSH (`serve`). Глобальный broadcast
+    остаётся запасным путём (нет вьювера/authority — вернёт False).
+    RPC (`host.request`) доходит только до gateway-маршрута.
     """
     try:
-        from hermes_cli.plugin_events import broadcast_plugin_event
+        from hermes_cli import plugin_events as _pe
     except Exception:
         return
     try:
@@ -896,7 +895,16 @@ def _push_status(session_id: str) -> None:
             return
         res = dict(res)
         res["session_id"] = session_id
-        broadcast_plugin_event("idle-compact", "status", res)
+        try:
+            sent = bool(_pe.emit_plugin_session_event(
+                "idle-compact", session_id, "status", res))
+        except Exception:
+            sent = False
+        if not sent:
+            try:
+                _pe.broadcast_plugin_event("idle-compact", "status", res)
+            except Exception:
+                logger.debug("idle-compact: status broadcast failed", exc_info=True)
     except Exception:
         logger.debug("idle-compact: status push failed", exc_info=True)
 

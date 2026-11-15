@@ -159,16 +159,34 @@ export default {
 
     // One best-effort pull for the gateway route; the push covers the rest.
     // A slow or failing backend must never block chip registration.
+    // Switching chats resets the chip: stale numbers of another session
+    // must not pose as current. A single pull tries the gateway route at
+    // once; the push fills it on the next turn.
+    const pullOnce = () => {
+      try {
+        const out = fetchStatus()
+        if (out && typeof out.then === 'function') {
+          out.then(
+            (fresh) => data.set(fresh),
+            (e) => { if (isUnknownMethod(e)) { rpcUnsupported = true } }
+          )
+        }
+      } catch (e) {
+        // No RPC here — the push will fill the chip on the next turn.
+      }
+    }
+    pullOnce()
     try {
-      const out = fetchStatus()
-      if (out && typeof out.then === 'function') {
-        out.then(
-          (fresh) => data.set(fresh),
-          (e) => { if (isUnknownMethod(e)) { rpcUnsupported = true } }
-        )
+      const a = host.state && host.state.activeSessionId
+      if (a && typeof a.listen === 'function') {
+        ctx.onDispose(a.listen(() => {
+          rpcUnsupported = false
+          data.set({ chip: 'idle-compact', panel: '' })
+          pullOnce()
+        }))
       }
     } catch (e) {
-      // No RPC here — the push will fill the chip on the next turn.
+      // No session tracking — the push still fills the chip.
     }
   }
 }

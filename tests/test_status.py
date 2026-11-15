@@ -280,12 +280,18 @@ class TestRpcStatus(StatusBase):
             encoding="utf-8")
         seen = {}
         fake_mod = types.ModuleType("hermes_cli.plugin_events")
-        def _fake_broadcast(plugin_id, event, payload=None):
-            seen.update({"plugin_id": plugin_id, "event": event,
+        def _fake_emit(plugin_id, session_id, event, payload=None):
+            seen.update({"emit": (plugin_id, session_id, event),
                          "payload": payload})
+            return True
+        def _fake_broadcast(plugin_id, event, payload=None):
+            seen.update({"broadcast": (plugin_id, event),
+                         "payload": payload})
+        fake_mod.emit_plugin_session_event = _fake_emit
         fake_mod.broadcast_plugin_event = _fake_broadcast
         fake_pkg = types.ModuleType("hermes_cli")
         fake_pkg.__path__ = []
+        fake_pkg.plugin_events = fake_mod
         old_mod, old_pkg = (sys.modules.get("hermes_cli.plugin_events"),
                            sys.modules.get("hermes_cli"))
         sys.modules["hermes_cli.plugin_events"] = fake_mod
@@ -301,12 +307,45 @@ class TestRpcStatus(StatusBase):
                 sys.modules.pop("hermes_cli", None)
             else:
                 sys.modules["hermes_cli"] = old_pkg
-        self.assertEqual(seen.get("plugin_id"), "idle-compact")
-        self.assertEqual(seen.get("event"), "status")
+        self.assertEqual(seen.get("emit"), ("idle-compact", "s1", "status"))
+        self.assertNotIn("broadcast", seen)
         payload = seen.get("payload") or {}
         self.assertEqual(payload.get("chip"), "~290K left")
         self.assertIn("current context: ~10K", payload.get("panel", ""))
         self.assertEqual(payload.get("session_id"), "s1")
+
+    def test_push_falls_back_to_broadcast(self):
+        import sys
+        import types
+        mod, home = self._mod_with_home(
+            "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n"
+        )
+        self._db_with_session(home)
+        seen = {}
+        fake_mod = types.ModuleType("hermes_cli.plugin_events")
+        fake_mod.emit_plugin_session_event = lambda *a, **k: False
+        def _fake_broadcast(plugin_id, event, payload=None):
+            seen.update({"broadcast": (plugin_id, event)})
+        fake_mod.broadcast_plugin_event = _fake_broadcast
+        fake_pkg = types.ModuleType("hermes_cli")
+        fake_pkg.__path__ = []
+        fake_pkg.plugin_events = fake_mod
+        old_mod, old_pkg = (sys.modules.get("hermes_cli.plugin_events"),
+                           sys.modules.get("hermes_cli"))
+        sys.modules["hermes_cli.plugin_events"] = fake_mod
+        sys.modules["hermes_cli"] = fake_pkg
+        try:
+            mod._push_status("s1")
+        finally:
+            if old_mod is None:
+                sys.modules.pop("hermes_cli.plugin_events", None)
+            else:
+                sys.modules["hermes_cli.plugin_events"] = old_mod
+            if old_pkg is None:
+                sys.modules.pop("hermes_cli", None)
+            else:
+                sys.modules["hermes_cli"] = old_pkg
+        self.assertEqual(seen.get("broadcast"), ("idle-compact", "status"))
 
     def test_rpc_empty_home(self):
         mod, _home = self._mod_with_home()
