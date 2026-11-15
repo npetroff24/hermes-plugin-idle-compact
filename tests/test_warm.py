@@ -193,6 +193,97 @@ class TestRedirectSafety(unittest.TestCase):
         self.assertIn("redirect not followed", str(ctx.exception))
 
 
+class TestNoOutputCap(unittest.TestCase):
+    def test_chat_without_cap(self):
+        body = wc.build_payload({"messages": [{"role": "user", "content": "hi"}]},
+                                "сожми", "chat_completions", None)
+        self.assertNotIn("max_tokens", body)
+
+    def test_responses_without_cap(self):
+        body = wc.build_payload({"input": [{"role": "user", "content": "hi"}]},
+                                "сожми", "codex_responses", None)
+        self.assertNotIn("max_output_tokens", body)
+
+    def test_anthropic_without_cap(self):
+        body = wc.build_payload({"messages": [{"role": "user", "content": "hi"}]},
+                                "сожми", "anthropic_messages", None)
+        self.assertNotIn("max_tokens", body)
+
+    def test_explicit_cap_from_capture_dropped(self):
+        """Захват мог содержать max_tokens основного чата — он не должен утечь."""
+        body = wc.build_payload({"messages": [{"role": "user", "content": "hi"}],
+                                 "max_tokens": 128}, "сожми", "chat_completions", None)
+        self.assertNotIn("max_tokens", body)
+
+
+class TestTruncationGuard(unittest.TestCase):
+    def test_chat_length(self):
+        self.assertTrue(wc._truncated({"choices": [{"finish_reason": "length"}]}, "chat_completions"))
+
+    def test_chat_stop(self):
+        self.assertFalse(wc._truncated({"choices": [{"finish_reason": "stop"}]}, "chat_completions"))
+
+    def test_anthropic_max_tokens(self):
+        self.assertTrue(wc._truncated({"stop_reason": "max_tokens"}, "anthropic_messages"))
+
+    def test_anthropic_end_turn(self):
+        self.assertFalse(wc._truncated({"stop_reason": "end_turn"}, "anthropic_messages"))
+
+    def test_responses_incomplete(self):
+        data = {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
+        self.assertTrue(wc._truncated(data, "codex_responses"))
+
+    def test_responses_completed(self):
+        self.assertFalse(wc._truncated({"status": "completed"}, "codex_responses"))
+
+    def test_no_choices(self):
+        self.assertFalse(wc._truncated({}, "chat_completions"))
+
+
+class TestExtraContext(unittest.TestCase):
+    def _we(self):
+        spec = importlib.util.spec_from_file_location("we_extra", PLUGIN_DIR / "warm_engine.py")
+        we = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(we)
+        return we
+
+    def test_nothing_added(self):
+        we = self._we()
+        self.assertEqual(we._extra_context("обычный промпт ядра", None), "")
+
+    def test_previous_summary_from_arg(self):
+        we = self._we()
+        out = we._extra_context("x", "## Goal\nсделать")
+        self.assertIn("PREVIOUS SUMMARY:", out)
+        self.assertIn("сделать", out)
+        self.assertIn("PRESERVE", out)
+
+    def test_previous_summary_parsed_from_prompt(self):
+        we = self._we()
+        prompt = "text\n\nPREVIOUS SUMMARY:\nстарое саммари\n\nNEW TURNS TO INCORPORATE:\nновое"
+        out = we._extra_context(prompt, None)
+        self.assertIn("старое саммари", out)
+        self.assertNotIn("новое", out)
+
+    def test_previous_summary_truncated(self):
+        we = self._we()
+        out = we._extra_context("x", "a" * (we.PREV_SUMMARY_LIMIT + 500))
+        self.assertIn("[truncated]", out)
+        self.assertLess(len(out), we.PREV_SUMMARY_LIMIT + 2000)
+
+    def test_focus_topic(self):
+        we = self._we()
+        out = we._extra_context('x\n\nFOCUS TOPIC: "плагин idle"\nдальше', None)
+        self.assertIn('FOCUS TOPIC: "плагин idle"', out)
+        self.assertIn("PRIORITISE", out)
+
+    def test_focus_and_previous_together(self):
+        we = self._we()
+        out = we._extra_context('FOCUS TOPIC: "тема"', "прошлое")
+        self.assertIn("PREVIOUS SUMMARY:", out)
+        self.assertIn('FOCUS TOPIC: "тема"', out)
+
+
 class TestEngineSignature(unittest.TestCase):
     def test_signature_matches_kernel(self):
         """Если ядро сменит сигнатуру _call_summary_llm — warm должен отключиться, а не падать."""

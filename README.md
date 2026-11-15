@@ -108,6 +108,8 @@ Works on Windows and Linux.
 Check status any time with `/idle-compact` in chat (read-only):
 money saved, ledger breakdown, current size vs gate, watch state.
 `/idle-compact debug` shows internals (engine, timers, exact figures).
+Warm summaries follow the kernel's section layout; a previous summary and a
+focus topic are appended after the captured prefix, so the cache stays warm.
 Desktop also shows a status-bar chip (`~185K left`, or `ready`
 past the gate); click it for the full panel as a popup.
 
@@ -257,6 +259,8 @@ hermes config set plugins.idle_compact.gate_fraction 0.2
 Состояние — командой `/idle-compact` в чате (только чтение):
 сэкономленные деньги, разбивка, текущий контекст против порога, наблюдение.
 `/idle-compact debug` — внутренности (движок, таймеры, точные цифры).
+Тёплое саммари идёт по структуре ядра; прошлое саммари и тема фокуса
+дописываются в конец запроса, поэтому кеш не ломается.
 В десктопе — чип в статус-баре (`~185K left`, выше порога `ready`); клик —
 полная панель всплывашкой.
 

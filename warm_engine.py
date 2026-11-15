@@ -23,10 +23,56 @@ from __future__ import annotations
 
 import inspect
 import logging
+import re
 import threading
 import time
 
 logger = logging.getLogger(__name__)
+
+# Предыдущее саммари вставляется в хвост запроса (после захваченного префикса),
+# поэтому кеш не ломается. Лимит — чтобы хвост не раздувался.
+PREV_SUMMARY_LIMIT = 20_000
+_FOCUS_RE = re.compile(r'FOCUS TOPIC:\s*"([^"]{1,400})"')
+_PREV_MARK = "PREVIOUS SUMMARY:"
+_PREV_END = "NEW TURNS TO INCORPORATE:"
+
+
+def _extra_context(prompt: str, previous_summary: str | None = None) -> str:
+    """Добавка в хвост warm-запроса: прошлое саммари и тема фокуса.
+
+    Идёт ПОСЛЕ захваченного префикса, поэтому prompt-cache не страдает.
+    Прошлое саммари возвращает итеративность (ядро просит обновить, а не
+    переписать), фокус — приоритет темы, который иначе терялся бы.
+    """
+    parts: list[str] = []
+    prev = (previous_summary or "").strip()
+    if not prev:
+        # Фолбэк: ядро могло положить саммари в сам промпт.
+        text = prompt or ""
+        start = text.find(_PREV_MARK)
+        if start >= 0:
+            start += len(_PREV_MARK)
+            end = text.find(_PREV_END, start)
+            prev = text[start:end if end > start else len(text)].strip()
+    if prev:
+        if len(prev) > PREV_SUMMARY_LIMIT:
+            prev = prev[:PREV_SUMMARY_LIMIT] + "\n...[truncated]"
+        parts.append(
+            "A previous compaction produced the summary below. PRESERVE all existing "
+            "information that is still relevant, ADD the new completed actions "
+            "(continue numbering), move finished items to Completed Actions and "
+            "answered questions to Resolved Questions. Remove only what is clearly "
+            "obsolete.\n\nPREVIOUS SUMMARY:\n" + prev
+        )
+    match = _FOCUS_RE.search(prompt or "")
+    if match:
+        parts.append(
+            f'FOCUS TOPIC: "{match.group(1)}"\n'
+            "PRIORITISE everything related to this topic: exact values, file paths, "
+            "command output, error messages and decisions. Summarise unrelated "
+            "content more aggressively."
+        )
+    return "\n\n" + "\n\n".join(parts) if parts else ""
 
 
 def _import_base():
@@ -40,7 +86,7 @@ def _import_base():
 # 43К токенов, префикс не совпадал и prompt-cache не срабатывал ни разу.
 # Здесь только правила и формат — история уже есть в захваченном теле.
 WARM_INSTRUCTION = """\
-Stop the current task now. This request comes from the host program, not from the user. The host will replace \
+Stop the current task now. This request comes from the host program, from the user. The host will replace \
 this conversation with a short summary. After that, the system prompt and your summary are the only record of \
 this conversation. Write that summary now.
 
@@ -50,15 +96,27 @@ Rules:
 - Copy names, identifiers, values, paths, and commands exactly. Never include API keys, tokens, passwords or \
 secrets — replace any that appear with [REDACTED].
 - Write in the language of the conversation. Use short bullets.
+- Keep what matters: decisions, agreed rules, concrete numbers, file paths, commands, error messages and their \
+fixes. Drop small talk, repeated reasoning and superseded plans.
 
 Use these headings, in this order, each on its own line. Start the reply with "## Goal":
 
 ## Goal
-## User instructions
-## Current state
-## Files and artifacts
-## Errors and fixes
+## Constraints & Preferences
+## Completed Actions
+Number the actions you finished, one per line, with the exact details that matter.
+## Active State
+What is true right now: what was running, what was changed, what is pending.
+## Blocked
+What is waiting, on what, and why.
+## Key Decisions
+Each decision with the reason behind it.
+## Errors & Fixes
+What broke and how it was fixed.
+## Resolved Questions
+Questions asked and the answers found.
 ## Next step
+The first thing to do after this summary.
 """
 
 
@@ -164,7 +222,7 @@ class IdleWarmCompressor:
 
                         text, stats = warm_client.apply_warm(
                             captured=capture,
-                            prompt=WARM_INSTRUCTION,
+                            prompt=WARM_INSTRUCTION + _extra_context(prompt, getattr(self, "_previous_summary", None)),
                             api_mode=route.get("api_mode") or self.api_mode,
                             base_url=route.get("base_url") or self.base_url,
                             api_key=route.get("api_key") or self.api_key,
@@ -182,6 +240,11 @@ class IdleWarmCompressor:
                         return text
                     except Exception as exc:
                         logger.warning("idle-warm: warm-путь недоступен (%s), откат на aux", exc)
+                else:
+                    logger.info(
+                        "idle-warm: штатный путь — warm не взведён (capture=%s route=%s)",
+                        bool(capture), bool(route),
+                    )
 
                 return super()._call_summary_llm(prompt, prompt_started_at)
 
