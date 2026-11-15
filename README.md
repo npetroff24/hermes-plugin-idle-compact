@@ -12,35 +12,16 @@ completely — your next turn re-reads the whole context at full price.
 
 ## Advantages
 
-1. **No waiting when it finishes idle.** Compacts ahead of time, while idle —
-   if compaction completes before you return, the next message never waits for it.
-2. **Cache-warm, not cache-blind.** The summary request repeats your last turn
-   and hits prompt-cache at ~99.8% instead of ~0% — about **5.4× cheaper**
-   (see Stock vs plugin).
-3. **Timing per model.** Fires at 10% before cache expiry (TTL × 0.9).
-   Measured on our traffic: DeepSeek ~85 min, Spark ~10 min. Documented
-   by vendors: Claude, Kimi — 5 min. The rest is a conservative default
-   (5 min; GPT/Gemini 10 min). One caveat: Hermes evicts idle
-   chats after 60 min, so DeepSeek effectively fires at ~54 min
-   (see How it works).
-4. **Skips the small stuff.** The gate is a share of the model window
-   (suggested 0.2 in the Plugins hub; until you save, core target × 2) —
-   short chats are skipped,
-   nothing wasted.
-5. **Money is visible.** Every compaction logs SAVINGS: before → after, cost;
-   on your return — whether the entry was warm or cold and what was actually
-   saved.
-6. **Survives restarts.** Timers persist on disk — a gateway restart never
-   breaks a scheduled compaction.
-7. **Windows and Linux.** One codebase: locks via `msvcrt`/`fcntl`, paths via
-   `%LOCALAPPDATA%`/`~/.hermes`.
-8. **Warm everywhere, not just when idle.** The engine holds your latest
-   request, so compression that fires mid-work — threshold hit with no idle
-   time — takes the same warm path. No fresh capture — falls back to the
-   stock aux call (see How it works).
+1. **About 5× cheaper** (our measurement): instead of paying for the conversation twice, you pay pennies — the summary reads what you already paid for.
+2. **No waiting when idle.** Compaction runs while you're away; you come back to a slimmed chat and the answer starts right away.
+3. **Helps with no idle time too.** Hit the threshold mid-work and compaction still runs over what you already paid for, not at full price.
+4. **Picks the moment itself, with margin.** Providers keep your conversation for different periods; where it's known we fire ahead of it, where it isn't we keep a conservative margin.
+5. **Leaves small chats alone.** Short chats are skipped — no extra request is sent.
+6. **Money is visible.** After an idle compaction the log shows before → after and its cost; on your next turn, what it actually saved.
+7. **Survives restarts.** A scheduled compaction isn't lost when the gateway restarts.
 
-Bottom line: smaller context — cheaper every answer, no waiting when idle
-compaction finishes in time, every number in the log.
+Bottom line: cheaper answers, no waiting when idle, every number in the log.
+
 
 ## Stock vs plugin (measured)
 
@@ -121,6 +102,8 @@ Set it in the Plugins hub (→ Save), or with one command:
 hermes config set plugins.idle_compact.gate_fraction 0.2
 ```
 
+Works on Windows and Linux.
+
 ## Rollback
 
 ```bash
@@ -172,34 +155,16 @@ Compaction archives rows (`active=0`), never deletes.
 
 ## Преимущества
 
-1. **Ноль ожидания, если успело.** Сжимает заранее, в простое — если сжатие
-   завершилось до вашего возвращения, ждать его не придётся.
-2. **Сжатие по кешу, а не мимо.** Запрос суммирования повторяет последний ход
-   и попадает в prompt-cache на ~99.8% вместо ~0% — примерно **в 5.4 раза дешевле**
-   (см. Штатное и наше).
-3. **Момент подбирает сам.** Старт за 10% до протухания кеша (TTL × 0.9).
-   Замерено на нашем трафике: DeepSeek ~85 мин, Spark ~10 мин.
-   Документировано вендорами: Claude, Kimi — 5 мин. Остальное —
-   консервативный дефолт (5 мин; GPT/Gemini 10 мин). Нюанс: Hermes выгоняет чат
-   из памяти через 60 мин, поэтому дипсик срабатывает на 54-й минуте
-   (подробности — в Логике).
-4. **Мелочь не жмёт.** Порог — доля окна модели (в хабе плагинов
-   подсказано 0.2; пока не сохранили — цель ядра × 2) — короткие чаты
-   пропускаются, ничего не тратится.
-5. **Деньги видны.** После каждого сжатия пишет SAVINGS: было → стало, цена;
-   на вашем возврате — тёплым или холодным был вход и сколько реально
-   сэкономлено.
-6. **Переживает рестарт.** Таймеры сохраняются на диск — рестарт шлюза сжатие
-   не срывает.
-7. **Windows и Linux.** Один код: лок через `msvcrt`/`fcntl`, пути через
-   `%LOCALAPPDATA%`/`~/.hermes`.
-8. **Тепло везде, а не только в простое.** Движок держит последний запрос,
-   поэтому сжатие, сработавшее прямо во время работы — порог достигнут
-   без простоя — идёт тем же тёплым путём. Свежего захвата нет — откат
-   на штатный aux-вызов (см. Логику).
+1. **Сжатие примерно в 5 раз дешевле** (наш замер). Вместо повторной оплаты всего разговора доплачиваете копейки: сжатие читает то, за что вы уже заплатили.
+2. **В простое ждать не нужно.** Сжатие идёт, пока вы отошли. Вернулись — чат уже ужат, ответ начинается сразу.
+3. **Помогает и без простоя.** Порог наступил посреди работы — сжатие всё равно идёт по уже оплаченному разговору, а не по полной цене.
+4. **Момент выбирает сам, с запасом.** Провайдеры держат разговор в памяти разное время; где срок известен — сжимаем заранее, где нет — берём осторожный запас.
+5. **Мелочь не жмёт.** Короткие чаты пропускаются — лишнего запроса не будет.
+6. **Деньги видно.** После сжатия в простое лог показывает: было → стало, сколько стоило; на следующем ходе — сколько сэкономило.
+7. **Переживает рестарт.** Запланированное сжатие не теряется при перезапуске шлюза.
 
-Итого: меньше контекст — дешевле каждый ответ, без ожидания, если сжатие успело на простое, каждая
-цифра в логе.
+Итого: ответы дешевле, в простое ждать не надо, каждая цифра в логе.
+
 
 ## Штатное и наше (замеры)
 
@@ -279,6 +244,8 @@ hermes config set context.engine idle_warm
 ```bash
 hermes config set plugins.idle_compact.gate_fraction 0.2
 ```
+
+Работает на Windows и Linux.
 
 ## Откат
 
