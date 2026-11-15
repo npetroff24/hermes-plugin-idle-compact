@@ -12,7 +12,7 @@ completely — your next turn re-reads the whole context at full price.
 
 ## Advantages
 
-1. **About 5× cheaper** (our measurement): instead of paying for the conversation twice, you pay pennies — the summary reads what you already paid for.
+1. **Nearly 20× cheaper** (our measurement): instead of paying for the conversation twice, you pay pennies — the summary reads what you already paid for.
 2. **No waiting when idle.** Compaction runs while you're away; you come back to a slimmed chat and the answer starts right away.
 3. **Helps with no idle time too.** Hit the threshold mid-work and compaction still runs over what you already paid for, not at full price.
 4. **Picks the moment itself, with margin.** Providers keep your conversation for different periods; where it's known we fire ahead of it, where it isn't we keep a conservative margin.
@@ -28,11 +28,12 @@ Bottom line: cheaper answers, no waiting when idle, every number in the log.
 | | Stock compression | idle-compact |
 |---|---|---|
 | Your wait | ~3 min mid-answer (p50 184 s, [#117886](https://github.com/NousResearch/hermes-agent/issues/117886)) | 0 — compacts in the background (a pass takes 18–22 s off the critical path) |
-| Cache use | cold: cache_read = 0 | ~99.8% from cache (130 432 cached / 280 fresh) |
-| Price | $0.0188 per ~60K tokens | $0.0035 per ~64K tokens — **≈5.4× cheaper** |
+| Cache use | cold: cache_read = 0 | ~99.85% from cache (241 792 cached / 356 fresh) |
+| Price | ~$0.068 to cold re-read 228K tokens (prevented) | $0.00346 per compaction — **nearly 20× cheaper** |
 
-Wait from #117886 (gateway session); cache and prices from our provider
-dashboard and logs, 2026-11-13, opencode-go relay.
+Wait from #117886 (gateway session); cache, cost and savings from our logs:
+2026-11-12 case, 228K-token session, opencode-go relay (ledger prices match
+the provider dashboard).
 Summaries stay structural (Goal / Current state / Next step); tools and
 reasoning are unaffected.
 
@@ -155,7 +156,7 @@ Compaction archives rows (`active=0`), never deletes.
 
 ## Преимущества
 
-1. **Сжатие примерно в 5 раз дешевле** (наш замер). Вместо повторной оплаты всего разговора доплачиваете копейки: сжатие читает то, за что вы уже заплатили.
+1. **Сжатие почти в 20 раз дешевле** (наш замер). Вместо повторной оплаты всего разговора доплачиваете копейки: сжатие читает то, за что вы уже заплатили.
 2. **В простое ждать не нужно.** Сжатие идёт, пока вы отошли. Вернулись — чат уже ужат, ответ начинается сразу.
 3. **Помогает и без простоя.** Порог наступил посреди работы — сжатие всё равно идёт по уже оплаченному разговору, а не по полной цене.
 4. **Момент выбирает сам, с запасом.** Провайдеры держат разговор в памяти разное время; где срок известен — сжимаем заранее, где нет — берём осторожный запас.
@@ -171,11 +172,11 @@ Compaction archives rows (`active=0`), never deletes.
 | | Штатное сжатие | idle-compact |
 |---|---|---|
 | Ваше ожидание | ~3 мин посреди ответа (p50 184 с, [#117886](https://github.com/NousResearch/hermes-agent/issues/117886)) | 0 — жмёт в фоне (проход 18–22 с вне ответа) |
-| Кеш | вхолодную: cache_read = 0 | ~99.8% из кеша (130 432 из кеша / 280 свежих) |
-| Цена | $0.0188 за ~60K токенов | $0.0035 за ~64K токенов — **примерно в 5.4 раза дешевле** |
+| Кеш | вхолодную: cache_read = 0 | ~99.85% из кеша (241 792 из кеша / 356 свежих) |
+| Цена | ~$0.068 за холодный перечит 228K (предотвращён) | $0.00346 за сжатие — **почти в 20 раз дешевле** |
 
-Ожидание — из #117886 (сессия шлюза); кеш и цены — наш дашборд
-провайдера и логи, 13.11.2026, релей opencode-go.
+Ожидание — из #117886 (сессия шлюза); кеш, цена и экономия — наши логи:
+кейс 12.11.2026, сессия на 228K токенов, релей opencode-go (учётные цены совпадают с дашбордом).
 Саммари при этом остаётся структурным (Goal / Current state / Next step),
 tools и reasoning не ломаются.
 
