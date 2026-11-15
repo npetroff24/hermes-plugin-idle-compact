@@ -313,6 +313,39 @@ class TestRpcStatus(StatusBase):
         self.assertEqual(payload.get("chip"), "~290K left")
         self.assertIn("current context: ~10K", payload.get("panel", ""))
         self.assertEqual(payload.get("session_id"), "s1")
+        self.assertEqual(payload.get("session_key"), "s1")
+        self.assertEqual(payload.get("agent_session_id"), "s1")
+
+    def test_ui_session_id_maps_runtime(self):
+        import sys
+        import types
+        mod, _home = self._mod_with_home()
+        fake_agent = types.SimpleNamespace(session_id="20261115_181244_8773dc")
+        fake_tui = types.ModuleType("tui_gateway.server")
+        fake_tui._sessions = {"7bf26255": {"session_key": "20261115_181244_8773dc",
+                                           "agent": fake_agent}}
+        fake_pkg = types.ModuleType("tui_gateway")
+        fake_pkg.__path__ = []
+        fake_pkg.server = fake_tui
+        old = (sys.modules.get("tui_gateway"), sys.modules.get("tui_gateway.server"))
+        sys.modules["tui_gateway"] = fake_pkg
+        sys.modules["tui_gateway.server"] = fake_tui
+        try:
+            self.assertEqual(mod._ui_session_id("20261115_181244_8773dc"), "7bf26255")
+            self.assertIsNone(mod._ui_session_id("nope"))
+        finally:
+            if old[0] is None:
+                sys.modules.pop("tui_gateway", None)
+            else:
+                sys.modules["tui_gateway"] = old[0]
+            if old[1] is None:
+                sys.modules.pop("tui_gateway.server", None)
+            else:
+                sys.modules["tui_gateway.server"] = old[1]
+
+    def test_ui_session_id_no_tui(self):
+        mod, _home = self._mod_with_home()
+        self.assertIsNone(mod._ui_session_id("whatever"))
 
     def test_push_falls_back_to_broadcast(self):
         import sys

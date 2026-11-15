@@ -736,6 +736,33 @@ def _resident_desktop(session_id: str):
     return None
 
 
+def _ui_session_id(session_key: str) -> str | None:
+    """Runtime id tui-сессии (uuid4 hex[:8]) — то, что десктоп зовёт activeSessionId.
+
+    Агентский ключ (`20261115_181244_8773dc`) и runtime id (`7bf26255`) —
+    разные пространства (ядро явно реджектит 8-hex как session_key).
+    JS-фильтр сравнивает с activeSessionId, поэтому в payload кладём оба.
+    Ищем в том же реестре, что `_resident_desktop`.
+    """
+    try:
+        from tui_gateway import server as tui
+    except Exception:
+        return None
+    try:
+        sessions = getattr(tui, "_sessions", None)
+        if not isinstance(sessions, dict):
+            return None
+        for key, sess in list(sessions.items()):
+            if not isinstance(sess, dict):
+                continue
+            if sess.get("session_key") == session_key or getattr(
+                    sess.get("agent"), "session_id", None) == session_key:
+                return str(key)
+    except Exception:
+        return None
+    return None
+
+
 _warned_resident: set[str] = set()
 _last_warm_usage: dict | None = None
 _history_db = None
@@ -894,7 +921,10 @@ def _push_status(session_id: str) -> None:
         if not isinstance(res, dict):
             return
         res = dict(res)
-        res["session_id"] = session_id
+        # Оба пространства id: runtime (activeSessionId в десктопе) и
+        # агентский ключ. JS принимает событие при совпадении любого.
+        res["session_id"] = _ui_session_id(session_id) or session_id
+        res["session_key"] = res["agent_session_id"] = session_id
         try:
             sent = bool(_pe.emit_plugin_session_event(
                 "idle-compact", session_id, "status", res))
