@@ -176,18 +176,47 @@ def build_payload(captured: dict, prompt: str, api_mode: str, max_tokens: int | 
     if api_mode == "codex_responses":
         body["input"] = rows
         body.pop("messages", None)
-        body["max_output_tokens"] = int(max_tokens or 4000)
+        if max_tokens:
+            body["max_output_tokens"] = int(max_tokens)
+        else:
+            # Как в ядре: жёсткий лимит вывода обрезает саммари (thinking-модели
+            # тратят его на рассуждение). Лимит не ставим вовсе.
+            body.pop("max_output_tokens", None)
         body["store"] = False
         # stream в /responses не выставляем: с stream=false релей отвечает 403
         body.pop("stream", None)
     elif api_mode == "anthropic_messages":
         body["messages"] = rows
-        body["max_tokens"] = int(max_tokens or 4000)
+        if max_tokens:
+            body["max_tokens"] = int(max_tokens)
+        else:
+            body.pop("max_tokens", None)
     else:
         body["messages"] = rows
-        body["max_tokens"] = int(max_tokens or 4000)
+        if max_tokens:
+            body["max_tokens"] = int(max_tokens)
+        else:
+            body.pop("max_tokens", None)
         body["stream"] = False
     return body
+
+
+def _truncated(data: dict, api_mode: str) -> bool:
+    """Ответ оборван лимитом вывода? Текст при этом выглядит валидным.
+
+    Ядро на таком ответе падает намеренно: обрезанное саммари потеряет хвост
+    и утащит обрубок во все последующие сжатия.
+    """
+    if api_mode == "codex_responses":
+        status = str(data.get("status") or "")
+        reason = str(((data.get("incomplete_details") or {}).get("reason")) or "")
+        return status == "incomplete" or reason in ("max_output_tokens", "max_tokens")
+    if api_mode == "anthropic_messages":
+        return str(data.get("stop_reason") or "") in ("max_tokens", "length")
+    choices = data.get("choices") or []
+    if choices and isinstance(choices[0], dict):
+        return str(choices[0].get("finish_reason") or "") in ("length", "max_tokens")
+    return False
 
 
 def _extract_text(data: dict, api_mode: str) -> str:
@@ -253,6 +282,8 @@ def request_summary(
         raise WarmRefused("не JSON в ответе") from exc
 
     text = _extract_text(parsed, api_mode)
+    if _truncated(parsed, api_mode):
+        raise WarmRefused("саммари оборвано лимитом вывода (finish_reason=length)")
     usage = parsed.get("usage") or {}
     oc = (usage.get("opencode") or {}).get("tokens") or {}
     stats = {

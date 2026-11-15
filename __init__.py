@@ -911,18 +911,28 @@ def _arm_engine(session_id: str) -> None:
     """
     cap = _capture_for(session_id)
     if not cap:
+        logger.info("idle-compact: взвод пропущен — нет свежего захвата сессии %s", session_id[:24])
         return
     ts = float(cap.get("ts") or 0)
     model = cap.get("model") or ""
     # Старше окна кеша повтор бессмыслен: префикса уже нет у провайдера.
     if not ts or time.time() - ts > policy.arm_window_for(model):
+        logger.info(
+            "idle-compact: взвод пропущен — захват старее окна (%.0fс > %.0fс) для %s",
+            time.time() - ts, policy.arm_window_for(model), session_id[:24],
+        )
         return
     found = _resident(session_id)
     if not found:
+        logger.info("idle-compact: взвод пропущен — агент не найден в этом процессе (%s)", session_id[:24])
         return
     agent, comp, _route, _runner = found
     begin = getattr(comp, "begin_warm", None)
     if not callable(begin):
+        logger.info(
+            "idle-compact: взвод пропущен — у компрессора нет begin_warm (%s)",
+            type(comp).__name__,
+        )
         return
     _note_window(cap.get("model") or getattr(agent, "model", ""), getattr(comp, "context_length", 0))
     _note_usage(session_id, getattr(comp, "last_prompt_tokens", 0))
