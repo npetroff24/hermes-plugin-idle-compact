@@ -13,6 +13,12 @@ import { jsx } from 'react/jsx-runtime'
 const RPC_METHOD = 'plugin.idle-compact.status'
 const POLL_MS = 30000
 const TOAST_MS = 12000
+const TOAST_ID = 'idle-compact-status'
+
+// Toggle state: the SDK has no dismiss verb, so hiding is done by
+// re-notifying the same id with a 1ms lifetime (replaces + instantly expires).
+let toastShown = false
+let toastAt = 0
 
 function currentSessionId() {
   try {
@@ -43,10 +49,28 @@ function Chip({ data }) {
   const snap = useValue(data)
 
   const onClick = async () => {
+    if (toastShown && Date.now() - toastAt < TOAST_MS) {
+      toastShown = false
+      try {
+        host.notify({ durationMs: 1, id: TOAST_ID, kind: 'info', message: '', title: 'idle-compact' })
+      } catch (e) {
+        // Fallback: let it expire on its own.
+      }
+      return
+    }
     try {
       const fresh = await fetchStatus()
       data.set(fresh)
-      host.notify({ durationMs: TOAST_MS, kind: 'info', message: fresh.panel, title: 'idle-compact' })
+      toastShown = true
+      toastAt = Date.now()
+      host.notify({
+        durationMs: TOAST_MS,
+        id: TOAST_ID,
+        kind: 'info',
+        message: fresh.panel,
+        onDismiss: () => { toastShown = false },
+        title: 'idle-compact'
+      })
     } catch (e) {
       host.notify({ durationMs: TOAST_MS, kind: 'error', message: 'idle-compact: status unavailable', title: 'idle-compact' })
     }
