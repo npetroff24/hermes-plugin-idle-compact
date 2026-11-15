@@ -1591,33 +1591,33 @@ def _cmd_status(raw_args: str = "", session_id: str | None = None) -> str:
     lines = [f"idle-compact {_STATUS_VERSION}"]
     stats = _ledger_stats()
     if stats is None or stats["events"] <= 0:
-        lines.append("сжатий учтено: 0")
+        lines.append("compactions counted: 0")
     else:
-        money = f"сэкономлено: {_fmt_money(stats['net'])}"
+        money = f"saved: {_fmt_money(stats['net'])}"
         if stats["base"] > 0:
             pct = int(round(100 * stats["net"] / stats["base"]))
-            money += f" — это {pct}% трат без плагина"
+            money += f" — that's {pct}% of costs without the plugin"
         lines.append(money)
-        brk = f"в плюс {stats['plus_n']} · зря {stats['waste_n']}"
+        brk = f"paid off {stats['plus_n']} · wasted {stats['waste_n']}"
         if stats["unmeasured_n"] > 0:
-            brk += f" · ещё {stats['unmeasured_n']} не в счёте (не записался расход)"
+            brk += f" · {stats['unmeasured_n']} more not counted (cost not saved)"
         lines.append(brk)
         if stats["last_ts"] > 0:
-            lines.append(f"последнее сжатие: {_fmt_ts(stats['last_ts'])}")
+            lines.append(f"last compaction: {_fmt_ts(stats['last_ts'])}")
     size, gate = _panel_context(session_id)
     if size is not None:
-        ctx = f"текущий контекст: {_fmt_k(size)}"
+        ctx = f"current context: {_fmt_k(size)}"
         if gate:
             if size >= gate:
-                ctx += f" · выше порога ({_fmt_k(gate)})"
+                ctx += f" · over the limit ({_fmt_k(gate)})"
             else:
-                ctx += f" · до сжатия ещё {_fmt_k(gate - size)} (порог {_fmt_k(gate)})"
+                ctx += f" · {_fmt_k(gate - size)} left before compaction (limit {_fmt_k(gate)})"
         lines.append(ctx)
     watch = _panel_watch(session_id)
     if watch:
         lines.append(watch)
     if stats is not None and stats["waste_n"] > 0:
-        lines.append("«зря» = не окупилось (обычно: вернулись раньше смерти кеша)")
+        lines.append("“wasted” = did not pay off (usually: you came back before the cache died)")
     return "\n".join(lines)
 
 
@@ -1665,10 +1665,10 @@ def _panel_watch(session_id: str | None) -> str:
         return ""
     if session_id:
         if session_id in live:
-            return "эта сессия: сожмётся в простое"
-        return "эта сессия: в простое не сожмётся"
+            return "this chat: will compact while idle"
+        return "this chat: will not compact while idle"
     if live:
-        return f"под наблюдением: {len(live)}"
+        return f"waiting for idle: {len(live)}"
     return ""
 
 
@@ -1676,7 +1676,7 @@ def _cmd_debug(session_id: str | None = None) -> str:
     """``/idle-compact debug``: внутренности для разбора полётов."""
     lines = [f"idle-compact {_STATUS_VERSION} · debug"]
     try:
-        engine = "да" if _WARM_ENGINE is not None else "нет"
+        engine = "on" if _WARM_ENGINE is not None else "off"
     except Exception:
         engine = "?"
     try:
@@ -1684,7 +1684,7 @@ def _cmd_debug(session_id: str | None = None) -> str:
             timers = len(_timers)
     except Exception:
         timers = "?"
-    lines.append(f"тёплое сжатие: {engine} · таймеры процесса: {timers} (pid {os.getpid()})")
+    lines.append(f"warm compaction: {engine} · process timers: {timers} (pid {os.getpid()})")
     try:
         cfg = _read_config()
         frac = _gate_fraction(session_id, cfg)
@@ -1701,24 +1701,24 @@ def _cmd_debug(session_id: str | None = None) -> str:
             window = _cached_window(model)
     _size, gate = _panel_context(session_id)
     lines.append(
-        f"порог: доля {frac:g} · окно {model or '?'}={window or '?'} (кеш) · "
-        f"токены {gate if gate else '?'}"
+        f"gate: share {frac:g} · window {model or '?'}={window or '?'} (cache) · "
+        f"tokens {gate if gate else '?'}"
     )
     stats = _ledger_stats()
     if stats is None:
-        lines.append("леджер: не читается")
+        lines.append("ledger: unreadable")
     else:
         lines.append(
-            f"вердикты: холодных {stats['cold_n']} · тёплых {stats['warm_n']}"
+            f"verdicts: cold {stats['cold_n']} · warm {stats['warm_n']}"
         )
         lines.append(
-            f"деньги точно: +${stats['plus']:.5f} ${stats['waste']:.5f} = "
-            f"${stats['net']:+.5f} · базлайн ${stats['base']:.5f}"
+            f"exact money: +${stats['plus']:.5f} ${stats['waste']:.5f} = "
+            f"${stats['net']:+.5f} · baseline ${stats['base']:.5f}"
         )
         if stats["unmeasured_n"] > 0 or stats["legacy_n"] > 0:
             lines.append(
-                f"вне счёта: без расхода {stats['unmeasured_n']} · "
-                f"прежней формулой {stats['legacy_n']}"
+                f"out of count: no cost {stats['unmeasured_n']} · "
+                f"old formula {stats['legacy_n']}"
             )
     return "\n".join(lines)
 
@@ -1793,7 +1793,7 @@ def register(ctx) -> None:
         reg_cmd = getattr(ctx, "register_command", None)
         if callable(reg_cmd):
             reg_cmd("idle-compact", _cmd_status,
-                    description="idle-compact: состояние плагина (только чтение)")
+                    description="idle-compact: plugin status (read-only)")
     except Exception:
         logger.debug("idle-compact: command registration skipped", exc_info=True)
     logger.info(
