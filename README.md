@@ -12,7 +12,7 @@ completely — your next turn re-reads the whole context at full price.
 
 ## Advantages
 
-1. **Nearly 20× cheaper** (our measurement): instead of paying for the conversation twice, you pay pennies — the summary reads what you already paid for.
+1. **Tens of times cheaper** (measured ~20× on a 228K context): instead of paying for the conversation twice, you pay pennies — the summary reads what you already paid for.
 2. **No waiting when idle.** Compaction runs while you're away; you come back to a slimmed chat and the answer starts right away.
 3. **Helps with no idle time too.** Hit the threshold mid-work and compaction still runs over what you already paid for, not at full price.
 4. **Picks the moment itself, with margin.** Providers keep your conversation for different periods; where it's known we fire ahead of it, where it isn't we keep a conservative margin.
@@ -156,7 +156,7 @@ Compaction archives rows (`active=0`), never deletes.
 
 ## Преимущества
 
-1. **Сжатие почти в 20 раз дешевле** (наш замер). Вместо повторной оплаты всего разговора доплачиваете копейки: сжатие читает то, за что вы уже заплатили.
+1. **Сжатие в десятки раз дешевле** (замер: ~20× на контексте 228K). Вместо повторной оплаты всего разговора доплачиваете копейки: сжатие читает то, за что вы уже заплатили.
 2. **В простое ждать не нужно.** Сжатие идёт, пока вы отошли. Вернулись — чат уже ужат, ответ начинается сразу.
 3. **Помогает и без простоя.** Порог наступил посреди работы — сжатие всё равно идёт по уже оплаченному разговору, а не по полной цене.
 4. **Момент выбирает сам, с запасом.** Провайдеры держат разговор в памяти разное время; где срок известен — сжимаем заранее, где нет — берём осторожный запас.
