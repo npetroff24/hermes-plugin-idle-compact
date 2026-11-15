@@ -1,4 +1,4 @@
-"""Команда /idle-compact: панель статуса, read-only, один парс конфига на хук."""
+"""Команда /idle-compact: панель по макету, read-only, один парс на хук."""
 import importlib
 import importlib.util
 import json
@@ -41,7 +41,7 @@ class FakeCtx:
         pass
 
     def register_context_engine(self, engine):
-        return None  # ядро не приняло — warm останется выключенным
+        return None
 
     def register_command(self, name, handler, description="", args_hint="", argument_mode=None):
         self.commands[name] = handler
@@ -60,6 +60,19 @@ class StatusBase(unittest.TestCase):
         load_savings()._home = lambda: home  # type: ignore[attr-defined]
         return mod, home
 
+    def _db_with_session(self, home, session_id="s1", model="m", chars=40000):
+        con = sqlite3.connect(str(home / "state.db"))
+        con.execute(
+            "CREATE TABLE sessions (id TEXT, source TEXT, model TEXT, session_key TEXT,"
+            " message_count INT, api_call_count INT, archived INT, ended_at INT,"
+            " last_activity_at INT)"
+        )
+        con.execute("INSERT INTO sessions (id, model) VALUES (?, ?)", (session_id, model))
+        con.execute("CREATE TABLE messages (session_id TEXT, content TEXT, active INT)")
+        con.execute("INSERT INTO messages VALUES (?, ?, 1)", (session_id, "x" * chars))
+        con.commit()
+        con.close()
+
 
 class TestCommandRegistration(StatusBase):
     def test_register_exposes_idle_compact(self):
@@ -69,99 +82,151 @@ class TestCommandRegistration(StatusBase):
         self.addCleanup(mod.unregister, None)
         self.assertIn("idle-compact", ctx.commands)
         out = ctx.commands["idle-compact"]("")
-        self.assertIn("idle-compact 9.9.9-test", out)
-        self.assertIn("warm-движок: нет (этот процесс)", out)
+        self.assertTrue(out.startswith("idle-compact 9.9.9-test"))
+        self.assertNotIn("тёплое сжатие", out)  # диагностика — только в debug
+        dbg = ctx.commands["idle-compact"]("debug")
+        self.assertIn("· debug", dbg)
+        self.assertIn("тёплое сжатие: нет", dbg)
+
+
+class TestPanelMoney(StatusBase):
+    def _home_with_ledger(self):
+        mod, home = self._mod_with_home()
+        evs = [
+            {"ev": "settle", "ts": 1794728400.0, "saved_usd": 0.06,
+             "baseline_usd": 0.10, "verdict": "предотвращён холодный вход",
+             "facts": {"input": 10, "cache_read": 100, "output": 5, "calls": 1}},
+            {"ev": "settle", "ts": 1794728410.0, "saved_usd": -0.01,
+             "baseline_usd": 0.02, "verdict": "кеш был бы тёплым",
+             "facts": {"input": 10, "cache_read": 100, "output": 5, "calls": 1}},
+            {"ev": "settle", "ts": 1794728420.0, "saved_usd": 0.03,
+             "baseline_usd": 0.05, "verdict": "предотвращён холодный вход",
+             "facts": {"input": 0, "cache_read": 0, "output": 0, "calls": 0}},
+            {"ev": "settle", "ts": 1794728390.0, "saved_usd": 0.0,
+             "verdict": "предотвращён холодный вход",
+             "facts": {"input": 1, "cache_read": 1, "output": 1, "calls": 1}},
+        ]
+        (home / "idle_compact_ledger.jsonl").write_text(
+            "\n".join(json.dumps(e) for e in evs) + "\n", encoding="utf-8")
+        return mod, home
+
+    def test_money_percent_breakdown(self):
+        mod, _home = self._home_with_ledger()
+        out = mod._cmd_status("")
+        # net +0.05, base 0.12 → 42%
+        self.assertIn("сэкономлено: +$0.05 — это 42% трат без плагина", out)
+        self.assertIn("в плюс 1 · зря 1 · ещё 1 не в счёте (не записался расход)", out)
+        self.assertIn("последнее сжатие: ", out)
+        self.assertIn("«зря» = не окупилось", out)
+
+    def test_empty_ledger(self):
+        mod, _home = self._mod_with_home()
+        out = mod._cmd_status("")
+        self.assertIn("сжатий учтено: 0", out)
+        self.assertNotIn("сэкономлено", out)
+
+    def test_no_gloss_without_waste(self):
+        mod, home = self._mod_with_home()
+        (home / "idle_compact_ledger.jsonl").write_text(
+            json.dumps({"ev": "settle", "ts": 1794728400.0, "saved_usd": 0.06,
+                        "baseline_usd": 0.10, "verdict": "предотвращён холодный вход",
+                        "facts": {"input": 1, "cache_read": 1, "output": 1, "calls": 1}})
+            + "\n", encoding="utf-8")
+        out = mod._cmd_status("")
+        self.assertNotIn("«зря»", out)
+
+
+class TestPanelContext(StatusBase):
+    def _home_with_all(self, chars=40000):
+        mod, home = self._mod_with_home(
+            "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n"
+        )
+        self._db_with_session(home, chars=chars)
+        (home / "idle_compact_windows.json").write_text(
+            json.dumps({"m": 1000000}), encoding="utf-8")
+        return mod, home
+
+    def test_remaining_line(self):
+        mod, _home = self._home_with_all()
+        out = mod._cmd_status("", session_id="s1")
+        self.assertIn("текущий контекст: ~10K · до сжатия ещё ~290K (порог ~300K)", out)
+
+    def test_over_gate_line(self):
+        mod, _home = self._home_with_all(chars=1200004)
+        out = mod._cmd_status("", session_id="s1")
+        self.assertIn("выше порога (~300K)", out)
+
+    def test_no_window_no_gate(self):
+        mod, home = self._home_with_all()
+        (home / "idle_compact_windows.json").unlink()
+        out = mod._cmd_status("", session_id="s1")
+        self.assertIn("текущий контекст: ~10K", out)
+        self.assertNotIn("порог", out)
+
+    def test_no_session_no_context_line(self):
+        mod, _home = self._home_with_all()
+        out = mod._cmd_status("")
+        self.assertNotIn("текущий контекст", out)
+
+
+class TestPanelWatch(StatusBase):
+    def _home_with_pending(self):
+        mod, home = self._mod_with_home()
+        self._db_with_session(home, session_id="s-live", chars=100)
+        now = time.time()
+        (home / "idle_compact_pending.json").write_text(json.dumps({
+            "s-live": {"pid": os.getpid(), "deadline": now + 600,
+                       "stamp": now, "model": "m"},
+            "s-ghost": {"pid": os.getpid(), "deadline": now + 600,
+                        "stamp": now, "model": "m"},
+        }), encoding="utf-8")
+        return mod, home
+
+    def test_own_session_watched(self):
+        mod, _home = self._home_with_pending()
+        out = mod._cmd_status("", session_id="s-live")
+        self.assertIn("эта сессия: сожмётся в простое", out)
+
+    def test_own_session_not_watched(self):
+        mod, home = self._home_with_pending()
+        con = sqlite3.connect(str(home / "state.db"))
+        con.execute("INSERT INTO sessions (id) VALUES ('s-idle')")
+        con.commit()
+        con.close()
+        out = mod._cmd_status("", session_id="s-idle")
+        self.assertIn("эта сессия: в простое не сожмётся", out)
+
+    def test_no_session_counter(self):
+        mod, _home = self._home_with_pending()
+        out = mod._cmd_status("")
+        self.assertIn("под наблюдением: 1", out)
 
 
 class TestPanelReadOnly(StatusBase):
-    def _home_with_state(self):
-        mod, home = self._mod_with_home(
-            "compression:\n  threshold_tokens: 100000\n  target_ratio: 0.5\n"
-        )
-        now = time.time()
-        pending = {
-            "s-live": {"pid": os.getpid(), "deadline": now + 600, "stamp": now, "model": "m"},
-            "s-dead": {"pid": 999999999, "deadline": now + 600, "stamp": now, "model": "m"},
-            "s-expired": {"pid": os.getpid(), "deadline": now - 60, "stamp": now - 600, "model": "m"},
-            "s-junk": {"pid": "xx", "deadline": "soon", "model": "x"},
-        }
-        (home / "idle_compact_pending.json").write_text(
-            json.dumps(pending), encoding="utf-8")
-        ledger = [
-            {"event": "settle", "saved_usd": 0.01, "ts": 1794728400.0},
-            {"event": "settle", "saved_usd": -0.003, "ts": 1794728410.0},
-            {"event": "settle", "saved_usd": 0.005, "ts": 1794728420.0},
-        ]
-        (home / "idle_compact_ledger.jsonl").write_text(
-            "\n".join(json.dumps(e) for e in ledger) + "\n", encoding="utf-8")
-        return mod, home
-
     def test_files_and_timers_untouched(self):
-        mod, home = self._home_with_state()
-        before_pending = (home / "idle_compact_pending.json").read_bytes()
-        before_ledger = (home / "idle_compact_ledger.jsonl").read_bytes()
-        out = mod._cmd_status("")
-        self.assertIn("idle-compact", out)
-        self.assertEqual((home / "idle_compact_pending.json").read_bytes(), before_pending)
-        self.assertEqual((home / "idle_compact_ledger.jsonl").read_bytes(), before_ledger)
+        mod, home = self._mod_with_home()
+        (home / "idle_compact_pending.json").write_text('{"a": {}}', encoding="utf-8")
+        (home / "idle_compact_ledger.jsonl").write_text('{"ev": "x"}\n', encoding="utf-8")
+        (home / "idle_compact_windows.json").write_text('{"m": 1}', encoding="utf-8")
+        before = {f: (home / f).read_bytes() for f in (
+            "idle_compact_pending.json", "idle_compact_ledger.jsonl",
+            "idle_compact_windows.json")}
+        mod._cmd_status("", session_id="s1")
+        mod._cmd_status("debug", session_id="s1")
+        for f, data in before.items():
+            self.assertEqual((home / f).read_bytes(), data)
         self.assertEqual(dict(mod._timers), {})
 
-    def test_phantom_filter(self):
-        mod, home = self._home_with_state()
-        con = sqlite3.connect(str(home / "state.db"))
-        con.execute(
-            "CREATE TABLE sessions (id TEXT, source TEXT, model TEXT, session_key TEXT,"
-            " message_count INT, api_call_count INT, archived INT, ended_at INT,"
-            " last_activity_at INT)"
-        )
-        # Строки есть у s-live и s-expired; у s-ghost нет — он отсекается
-        # третьим фактором (переиспользованный pid + будущий дедлайн).
-        con.execute("INSERT INTO sessions (id) VALUES ('s-live'), ('s-expired')")
-        con.commit()
-        con.close()
-        pending = json.loads((home / "idle_compact_pending.json").read_text(encoding="utf-8"))
-        pending["s-ghost"] = {"pid": os.getpid(), "deadline": time.time() + 600,
-                              "stamp": time.time(), "model": "m"}
-        (home / "idle_compact_pending.json").write_text(json.dumps(pending), encoding="utf-8")
-        out = mod._cmd_status("")
-        self.assertIn("наблюдение (файл): 1 живых из 5", out)
 
-    def test_signed_money(self):
-        mod, _home = self._home_with_state()
-        out = mod._cmd_status("")
-        self.assertIn("событий 3, в плюс 2 (+$0.01500), зря 1 (-$0.00300), итог $+0.01200", out)
-        self.assertIn("последний счёт: ", out)
-        self.assertNotIn("пока нет", out)
-
-    def test_no_settle_note(self):
-        mod, home = self._home_with_state()
-        (home / "idle_compact_ledger.jsonl").write_text(
-            json.dumps({"event": "begin", "saved_usd": 0}) + "\n", encoding="utf-8")
-        out = mod._cmd_status("")
-        self.assertIn("последний счёт: пока нет", out)
-
-    def test_gate_in_tokens(self):
-        mod, _home = self._home_with_state()
-        out = mod._cmd_status("")
-        self.assertIn("порог: ~100000 токенов", out)
-
-    def test_gate_fraction_fallback(self):
-        mod, home = self._mod_with_home(
-            "compression:\n  threshold: 0.5\n  target_ratio: 0.2\n"
-            "plugins:\n  idle_compact:\n    gate_fraction: 0.35\n"
-        )
-        out = mod._cmd_status("")
-        self.assertIn("порог: 0.35 окна модели (окно неизвестно)", out)
-
-    def test_current_size_from_db(self):
-        mod, home = self._home_with_state()
-        con = sqlite3.connect(str(home / "state.db"))
-        con.execute("CREATE TABLE messages (session_id TEXT, content TEXT, active INT)")
-        con.execute("INSERT INTO messages VALUES ('s1', ?, 1)", ("x" * 4000,))
-        con.commit()
-        con.close()
-        out = mod._cmd_status("", session_id="s1")
-        self.assertIn("сейчас: ~1000 токенов", out)
+class TestWindowCache(StatusBase):
+    def test_roundtrip(self):
+        mod, home = self._mod_with_home()
+        self.assertEqual(mod._cached_window("m"), 0)
+        mod._note_window("m", 1000000)
+        self.assertEqual(mod._cached_window("m"), 1000000)
+        mod._note_window("", 5)
+        mod._note_window("m", 0)
+        self.assertEqual(mod._cached_window("m"), 1000000)
 
 
 class TestSingleParse(StatusBase):

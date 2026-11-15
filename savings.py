@@ -176,12 +176,29 @@ def delta(before: dict, after: dict) -> dict:
 # ── Чистый расчёт экономии (тестируется без сети и без базы) ─────────────
 
 
+# Поколение формулы учёта: 1 — вердикт по паузе после сжатия (занижал
+# холодные возвраты: ~540 с простоя до сжатия не считались), 2 — вердикт
+# по полному простою от последнего хода. Пишется в каждое событие.
+ALGO = 2
+
+
+def baseline_usd(before: int, would_be_cold: bool, model: str) -> float:
+    """Сколько стоил бы возврат БЕЗ автосжатия: весь ``before`` по fresh/read."""
+    p = price_for(model)
+    price = p["fresh"] if would_be_cold else p["read"]
+    return max(0, int(before)) / 1_000_000 * price
+
+
 def compute_saving(
     *, before: int, after: int, facts: dict, gap_s: float, ttl_s: int, model: str
 ) -> tuple[float, str, float, int]:
     """(экономия $, вердикт, стоимость сжатия $, ходов до окупаемости).
 
     Экономия = «сколько стоило бы БЕЗ автосжатия» минус «сколько стоило С ним».
+
+    ``gap_s`` — ПОЛНЫЙ простой от последнего хода пользователя до возврата
+    (включая ожидание таймера до сжатия). Только он отвечает на вопрос
+    «был бы кеш жив без нас»: пауза после сжатия занижала холодные возвраты.
 
     Без автосжатия: пользователь возвращается, кеш уже истёк (сжатие делалось
     как раз у границы TTL), поэтому весь ``before`` читается по полной цене
@@ -198,16 +215,16 @@ def compute_saving(
     p = price_for(model)
     compact_cost = cost_of_facts(facts, model)
     would_be_cold = gap_s >= ttl_s
-    baseline_price = p["fresh"] if would_be_cold else p["read"]
 
-    baseline = max(0, int(before)) / 1_000_000 * baseline_price
+    baseline = baseline_usd(before, would_be_cold, model)
     with_compact = max(0, int(after)) / 1_000_000 * p["read"] + compact_cost
     saved = baseline - with_compact
     verdict = "предотвращён холодный вход" if would_be_cold else "кеш был бы тёплым"
 
     payback = 0
     if saved < 0:
-        per_hop = (max(0, int(before)) - max(0, int(after))) / 1_000_000 * baseline_price
+        hop_price = p["fresh"] if would_be_cold else p["read"]
+        per_hop = (max(0, int(before)) - max(0, int(after))) / 1_000_000 * hop_price
         if per_hop > 0:
             payback = int(-saved // per_hop) + 1
     return saved, verdict, compact_cost, payback
@@ -251,11 +268,18 @@ def _sess(session_id: str) -> dict:
 # ── Хуки жизненного цикла сжатия ─────────────────────────────────────────
 
 
-def begin_compaction(session_id: str, model: str, before_tokens: int) -> None:
-    """Сжатие стартует: запоминаем счётчики сжатия и размер до."""
+def begin_compaction(session_id: str, model: str, before_tokens: int,
+                   idle_since: float | None = None) -> None:
+    """Сжатие стартует: запоминаем счётчики сжатия и размер до.
+
+    ``idle_since`` — момент последнего хода пользователя (взведение таймера).
+    Вердикт «был бы кеш жив без нас» считается от него, а не от старта
+    сжатия: иначе ожидание таймера выпадает из простоя.
+    """
     with _lock:
         _compacting[session_id] = {
             "start": time.time(),
+            "idle_since": float(idle_since) if idle_since else 0.0,
             "before": int(before_tokens),
             "model": model,
             "facts0": compression_counters(session_id),
@@ -289,6 +313,7 @@ def end_compaction(session_id: str, after_tokens: int | None = None,
         st["spent_usd"] += compact_cost
         st["pending"] = {
             "ts": win["start"],
+            "idle_since": float(win.get("idle_since") or win["start"]),
             "model": win["model"],
             "before": win["before"],
             "after": int(after_tokens or 0),
@@ -330,6 +355,8 @@ def on_post_api_request(**kw) -> None:
     now = time.time()
     started = kw.get("started_at") or now
     gap = max(0.0, float(started) - float(pend["ts"]))
+    idle_since = float(pend.get("idle_since") or pend["ts"])
+    full_gap = max(0.0, float(started) - idle_since)
 
     # Реальный размер контекста после сжатия: первый живой вызов после него.
     # Оценка по символам занижала в 2.6 раза (32 704 против фактических 85 322),
@@ -350,10 +377,12 @@ def on_post_api_request(**kw) -> None:
         before=int(pend.get("before") or 0),
         after=int(pend.get("after") or 0),
         facts=pend.get("facts") or {},
-        gap_s=gap,
+        gap_s=full_gap,
         ttl_s=ttl,
         model=pend["model"],
     )
+    baseline = baseline_usd(int(pend.get("before") or 0),
+                            verdict != "кеш был бы тёплым", pend["model"])
 
     with _lock:
         st = _sess(sid)
@@ -367,15 +396,18 @@ def on_post_api_request(**kw) -> None:
 
     ev = {
         "ev": "settle",
+        "algo": ALGO,
         "ts": round(now, 1),
         "session": sid,
         "model": pend["model"],
         "before": pend["before"],
         "after": pend["after"],
         "compact_cost_usd": round(compact_cost, 6),
+        "baseline_usd": round(baseline, 6),
         "compact_s": pend["dur_s"],
         "facts": pend.get("facts"),
         "gap_s": round(gap, 1),
+        "full_gap_s": round(full_gap, 1),
         "ttl_s": ttl,
         "verdict": verdict,
         "saved_usd": round(saved, 6),

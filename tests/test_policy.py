@@ -68,8 +68,13 @@ class TestPolicyValues(unittest.TestCase):
 
     def test_schedule_delay_is_capped_by_eviction(self):
         p = _policy()
-        self.assertAlmostEqual(p.schedule_delay_for("deepseek-v4.1-flash", 3600.0), 3600.0 * p.TTL_FACTOR)
-        self.assertAlmostEqual(p.schedule_delay_for("claude-sonnet", 3600.0), 300 * p.TTL_FACTOR)
+        self.assertAlmostEqual(p.schedule_delay_for("deepseek-v4.1-flash", 3600.0), 3600.0 - p.SCHEDULE_MARGIN_S)
+        self.assertAlmostEqual(p.schedule_delay_for("claude-sonnet", 3600.0), 300 - p.SCHEDULE_MARGIN_S)
+
+    def test_schedule_margin_is_absolute(self):
+        p = _policy()
+        # Короткий TTL: запас 30 с, а не доля (×0.9 от 60 давал бы 6 с рулетки).
+        self.assertAlmostEqual(p.schedule_delay_for("claude-sonnet", 60.0), 30.0)
 
     def test_watchdog_grace_has_named_floor(self):
         p = _policy()
