@@ -110,8 +110,10 @@ money saved, ledger breakdown, current size vs gate, watch state.
 `/idle-compact debug` shows internals (engine, timers, exact figures).
 Warm summaries follow the kernel's section layout; a previous summary and a
 focus topic are appended after the captured prefix, so the cache stays warm.
-Desktop also shows a status-bar chip (`~185K left`, or `ready`
+Desktop also shows a status-bar chip (`~185K left`, or `Ready`
 past the gate); click it for the full panel as a popup.
+The chip updates by push after every turn, so it also works over SSH,
+where direct RPC answers `-32601`.
 
 ## Rollback
 
@@ -261,8 +263,9 @@ hermes config set plugins.idle_compact.gate_fraction 0.2
 `/idle-compact debug` — внутренности (движок, таймеры, точные цифры).
 Тёплое саммари идёт по структуре ядра; прошлое саммари и тема фокуса
 дописываются в конец запроса, поэтому кеш не ломается.
-В десктопе — чип в статус-баре (`~185K left`, выше порога `ready`); клик —
-полная панель всплывашкой.
+В десктопе — чип в статус-баре (`~185K left`, выше порога `Ready`); клик —
+полная панель всплывашкой. Чип обновляется push'ем после каждого хода,
+поэтому работает и по SSH, где прямой RPC отвечает `-32601`.
 
 ## Откат
 
