@@ -122,7 +122,7 @@ class TestWarmFlag(unittest.TestCase):
         original = base._call_summary_llm
         base._call_summary_llm = lambda self, p, t: "aux"
         try:
-            with self.assertLogs("hermes_plugins.idle_compact.warm_engine", level="WARNING") as logs:
+            with self.assertLogs(level="WARNING") as logs:
                 e._call_summary_llm("prompt", 0.0)
         finally:
             base._call_summary_llm = original

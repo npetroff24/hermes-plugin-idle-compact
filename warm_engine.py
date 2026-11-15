@@ -242,9 +242,7 @@ class IdleWarmCompressor:
                         # Причина отказа видна отдельной строкой: без неё в логе
                         # остаётся только «откат на aux», а что именно не так —
                         # приходится угадывать.
-                        kind = "непригодный ответ" if isinstance(
-                            exc, getattr(warm_client, "WarmRefused", ())
-                        ) else type(exc).__name__
+                        kind = "непригодный ответ" if type(exc).__name__ == "WarmRefused" else type(exc).__name__
                         logger.warning(
                             "idle-warm: отказ (%s: %s) → штатный путь", kind, exc,
                         )
