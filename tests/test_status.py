@@ -266,6 +266,48 @@ class TestRpcStatus(StatusBase):
         res = mod._rpc_status({"session_id": "s1"})
         self.assertEqual(res["chip"], "Ready")
 
+    def test_push_status_broadcasts(self):
+        import sys
+        import types
+        mod, home = self._mod_with_home(
+            "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n"
+        )
+        self._db_with_session(home)
+        (home / "idle_compact_windows.json").write_text(
+            json.dumps({"m": 1000000}), encoding="utf-8")
+        (home / "idle_compact_usage.json").write_text(
+            json.dumps({"s1": {"tokens": 10000, "ts": time.time()}}),
+            encoding="utf-8")
+        seen = {}
+        fake_mod = types.ModuleType("hermes_cli.plugin_events")
+        def _fake_broadcast(plugin_id, event, payload=None):
+            seen.update({"plugin_id": plugin_id, "event": event,
+                         "payload": payload})
+        fake_mod.broadcast_plugin_event = _fake_broadcast
+        fake_pkg = types.ModuleType("hermes_cli")
+        fake_pkg.__path__ = []
+        old_mod, old_pkg = (sys.modules.get("hermes_cli.plugin_events"),
+                           sys.modules.get("hermes_cli"))
+        sys.modules["hermes_cli.plugin_events"] = fake_mod
+        sys.modules["hermes_cli"] = fake_pkg
+        try:
+            mod._push_status("s1")
+        finally:
+            if old_mod is None:
+                sys.modules.pop("hermes_cli.plugin_events", None)
+            else:
+                sys.modules["hermes_cli.plugin_events"] = old_mod
+            if old_pkg is None:
+                sys.modules.pop("hermes_cli", None)
+            else:
+                sys.modules["hermes_cli"] = old_pkg
+        self.assertEqual(seen.get("plugin_id"), "idle-compact")
+        self.assertEqual(seen.get("event"), "status")
+        payload = seen.get("payload") or {}
+        self.assertEqual(payload.get("chip"), "~290K left")
+        self.assertIn("current context: ~10K", payload.get("panel", ""))
+        self.assertEqual(payload.get("session_id"), "s1")
+
     def test_rpc_empty_home(self):
         mod, _home = self._mod_with_home()
         res = mod._rpc_status({})

@@ -2,7 +2,12 @@
  * idle-compact desktop half: status-bar chip + toast panel.
  *
  * Plain ESM for the runtime pipeline (`~/.hermes/plugins/idle-compact/desktop/plugin.js`).
- * SDK surface only: statusBar chip, gateway RPC to the Python half, in-app toast.
+ * SDK surface only: statusBar chip, gateway events, in-app toast.
+ *
+ * Data arrives by PUSH: the Python half broadcasts `plugin.idle-compact.status`
+ * after every turn. Push reaches every window, including Desktop-over-SSH
+ * (`serve`), where direct RPC (`host.request`) answers -32601. RPC stays only
+ * as a one-shot fallback for the click before the first event.
  * No transcript rows: the chip is always visible, the full panel shows on click
  * and dismisses by itself.
  */
@@ -11,7 +16,7 @@ import { atom, host, Tip, useValue } from '@hermes/plugin-sdk'
 import { jsx } from 'react/jsx-runtime'
 
 const RPC_METHOD = 'plugin.idle-compact.status'
-const POLL_MS = 30000
+const EVENT_TYPE = 'plugin.idle-compact.status'
 const TOAST_MS = 12000
 const TOAST_ID = 'idle-compact-status'
 
@@ -19,6 +24,7 @@ const TOAST_ID = 'idle-compact-status'
 // re-notifying the same id with a 1ms lifetime (replaces + instantly expires).
 let toastShown = false
 let toastAt = 0
+let rpcUnsupported = false
 
 function currentSessionId() {
   try {
@@ -27,6 +33,17 @@ function currentSessionId() {
   } catch (e) {
     return null
   }
+}
+
+function isUnknownMethod(e) {
+  if (!e) {
+    return false
+  }
+  if (e.code === -32601 || e.data === -32601) {
+    return true
+  }
+  const text = String((e && e.message) || e)
+  return text.indexOf('unknown method') >= 0 || text.indexOf('-32601') >= 0
 }
 
 async function fetchStatus() {
@@ -41,7 +58,7 @@ async function fetchStatus() {
   }
   return {
     chip: typeof res.chip === 'string' ? res.chip : 'idle-compact',
-    panel: typeof res.panel === 'string' ? res.panel : 'idle-compact: no data'
+    panel: typeof res.panel === 'string' ? res.panel : ''
   }
 }
 
@@ -58,6 +75,23 @@ function Chip({ data }) {
       }
       return
     }
+    if (snap.panel) {
+      toastShown = true
+      toastAt = Date.now()
+      host.notify({
+        durationMs: TOAST_MS,
+        id: TOAST_ID,
+        kind: 'info',
+        message: snap.panel,
+        onDismiss: () => { toastShown = false },
+        title: 'idle-compact'
+      })
+      return
+    }
+    if (rpcUnsupported) {
+      host.notify({ durationMs: TOAST_MS, kind: 'info', message: 'idle-compact status lives in chat — run /idle-compact', title: 'idle-compact' })
+      return
+    }
     try {
       const fresh = await fetchStatus()
       data.set(fresh)
@@ -72,6 +106,11 @@ function Chip({ data }) {
         title: 'idle-compact'
       })
     } catch (e) {
+      if (isUnknownMethod(e)) {
+        rpcUnsupported = true
+        host.notify({ durationMs: TOAST_MS, kind: 'info', message: 'idle-compact status lives in chat — run /idle-compact', title: 'idle-compact' })
+        return
+      }
       const detail = (e && (e.message || e.data || e.code)) || e
       host.notify({ durationMs: TOAST_MS, kind: 'error', message: `idle-compact: ${String(detail)}`, title: 'idle-compact' })
     }
@@ -93,18 +132,6 @@ export default {
   register(ctx) {
     const data = atom({ chip: 'idle-compact', panel: '' })
 
-    let stopped = false
-    const refresh = async () => {
-      if (stopped) {
-        return
-      }
-      try {
-        data.set(await fetchStatus())
-      } catch (e) {
-        // Gateway down or Python half unloaded: keep last good text.
-      }
-    }
-
     ctx.register({
       area: 'statusBar.right',
       id: 'chip',
@@ -112,23 +139,36 @@ export default {
       render: () => jsx(Chip, { data })
     })
 
-    refresh()
-    const timer = setInterval(refresh, POLL_MS)
-    let unlisten = null
-    try {
-      const a = host.state && host.state.activeSessionId
-      if (a && typeof a.listen === 'function') {
-        unlisten = a.listen(refresh)
-      }
-    } catch (e) {
-      unlisten = null
-    }
-    ctx.onDispose(() => {
-      stopped = true
-      clearInterval(timer)
-      if (typeof unlisten === 'function') {
-        unlisten()
+    ctx.onEvent(EVENT_TYPE, (event) => {
+      try {
+        const p = (event && event.payload) || {}
+        if (typeof p.chip !== 'string') {
+          return
+        }
+        if (p.session_id && p.session_id !== currentSessionId()) {
+          return
+        }
+        data.set({
+          chip: p.chip,
+          panel: typeof p.panel === 'string' ? p.panel : ''
+        })
+      } catch (e) {
+        // A bad frame must never break the chip.
       }
     })
+
+    // One best-effort pull for the gateway route; the push covers the rest.
+    // A slow or failing backend must never block chip registration.
+    try {
+      const out = fetchStatus()
+      if (out && typeof out.then === 'function') {
+        out.then(
+          (fresh) => data.set(fresh),
+          (e) => { if (isUnknownMethod(e)) { rpcUnsupported = true } }
+        )
+      }
+    } catch (e) {
+      // No RPC here — the push will fill the chip on the next turn.
+    }
   }
 }

@@ -877,6 +877,30 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
 _post_api_seen: set[str] = set()
 
 
+def _push_status(session_id: str) -> None:
+    """Отправить чип+панель глобальным событием.
+
+    RPC (`host.request`) доходит только до gateway-маршрута: `serve`
+    (Desktop по SSH) отвечает `-32601`. Глобальные события идут другим
+    каналом (`_live_transports`) и доходят до всех окон, включая serve.
+    Поэтому чип едет push'ем на каждом ходу, а RPC остаётся запасным
+    путём для клика до первого события.
+    """
+    try:
+        from hermes_cli.plugin_events import broadcast_plugin_event
+    except Exception:
+        return
+    try:
+        res = _rpc_status({"session_id": session_id})
+        if not isinstance(res, dict):
+            return
+        res = dict(res)
+        res["session_id"] = session_id
+        broadcast_plugin_event("idle-compact", "status", res)
+    except Exception:
+        logger.debug("idle-compact: status push failed", exc_info=True)
+
+
 def _on_post_api(session_id: str = "", **kwargs) -> None:
     """Ставим/сдвигаем таймер после каждого ответа модели.
 
@@ -899,6 +923,10 @@ def _on_post_api(session_id: str = "", **kwargs) -> None:
         _on_session_end(session_id=session_id)
     except Exception:
         logger.exception("idle-compact: timer hook failed for %s", session_id)
+    try:
+        _push_status(session_id)
+    except Exception:
+        logger.debug("idle-compact: status push hook failed", exc_info=True)
 
 
 def _arm_engine(session_id: str) -> None:
