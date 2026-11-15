@@ -47,6 +47,10 @@ class FakeCtx:
         self.commands[name] = handler
         return None
 
+    def register_rpc(self, name, handler):
+        self.commands["rpc:" + name] = handler
+        return None
+
 
 class StatusBase(unittest.TestCase):
     def _mod_with_home(self, config_text="other: 1\n"):
@@ -216,6 +220,38 @@ class TestPanelReadOnly(StatusBase):
         for f, data in before.items():
             self.assertEqual((home / f).read_bytes(), data)
         self.assertEqual(dict(mod._timers), {})
+
+
+class TestRpcStatus(StatusBase):
+    def test_rpc_returns_chip_and_panel(self):
+        mod, home = self._mod_with_home(
+            "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n"
+        )
+        self._db_with_session(home, chars=40000)
+        (home / "idle_compact_windows.json").write_text(
+            json.dumps({"m": 1000000}), encoding="utf-8")
+        (home / "idle_compact_ledger.jsonl").write_text(
+            json.dumps({"ev": "settle", "ts": 1794728400.0, "saved_usd": 0.06,
+                        "baseline_usd": 0.10, "verdict": "предотвращён холодный вход",
+                        "facts": {"input": 1, "cache_read": 1, "output": 1, "calls": 1}})
+            + "\n", encoding="utf-8")
+        res = mod._rpc_status({"session_id": "s1"})
+        self.assertEqual(res["chip"], "~10K/~300K · +$0.06")
+        self.assertTrue(res["panel"].startswith("idle-compact "))
+        self.assertIn("saved: +$0.06", res["panel"])
+
+    def test_rpc_empty_home(self):
+        mod, _home = self._mod_with_home()
+        res = mod._rpc_status({})
+        self.assertEqual(res["chip"], "idle-compact")
+        self.assertIn("compactions counted: 0", res["panel"])
+
+    def test_register_exposes_rpc(self):
+        mod, _home = self._mod_with_home()
+        ctx = FakeCtx()
+        mod.register(ctx)
+        self.addCleanup(mod.unregister, None)
+        self.assertIn("rpc:status", ctx.commands)
 
 
 class TestWindowCache(StatusBase):
