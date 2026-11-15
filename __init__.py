@@ -543,6 +543,53 @@ def _cached_window(model: str) -> int:
         return 0
 
 
+def _usage_path():
+    return _home() / "idle_compact_usage.json"
+
+
+def _note_usage(session_id: str, tokens: int) -> None:
+    """Запомнить реальный размер промпта сессии (usage API, не оценка).
+
+    Оценка по символам занижает в 2–3 раза и врёт даже сторону порога
+    (129K против реальных 366K) — панели/чипу отдаём только замер.
+    Записи старше 7 суток подчищаем тут же.
+    """
+    try:
+        tokens = int(tokens or 0)
+        session_id = str(session_id or "")
+        if tokens <= 0 or not session_id:
+            return
+        import json
+        import time as _time
+
+        path = _usage_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data = data if isinstance(data, dict) else {}
+        except Exception:
+            data = {}
+        now = _time.time()
+        data = {k: v for k, v in data.items()
+                if now - float((v or {}).get("ts") or 0) < 7 * 86400}
+        if (data.get(session_id) or {}).get("tokens") == tokens:
+            return
+        data[session_id] = {"tokens": tokens, "ts": now}
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        logger.debug("idle-compact: usage cache write failed", exc_info=True)
+
+
+def _cached_usage(session_id: str) -> int:
+    """Реальный размер сессии из кеша. Не видели — 0. Только чтение."""
+    try:
+        import json
+
+        data = json.loads(_usage_path().read_text(encoding="utf-8"))
+        return int(((data or {}).get(str(session_id or "")) or {}).get("tokens") or 0)
+    except Exception:
+        return 0
+
+
 def _pid_alive(pid: int) -> bool:
     """Жив ли процесс-владелец дедлайна (POSIX и Windows)."""
     if pid <= 0:
@@ -790,6 +837,7 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
                 # Реальный размер последнего промпта из usage API: оценка по
                 # символам занижает в 2–3 раза (JSON, tool_calls, system prompt).
                 api_size = int(getattr(comp, "last_prompt_tokens", 0) or 0)
+                _note_usage(session_id, api_size)
                 est = _estimate_history(comp, session_id)
                 exact = max(api_size, est or 0) or None
         if floor is None:
@@ -877,6 +925,7 @@ def _arm_engine(session_id: str) -> None:
     if not callable(begin):
         return
     _note_window(cap.get("model") or getattr(agent, "model", ""), getattr(comp, "context_length", 0))
+    _note_usage(session_id, getattr(comp, "last_prompt_tokens", 0))
     route = {
         "api_mode": cap.get("api_mode") or getattr(agent, "api_mode", ""),
         "base_url": cap.get("base_url") or getattr(agent, "base_url", ""),
@@ -1589,15 +1638,10 @@ def _rpc_status(params=None, session_id: str | None = None, **kwargs):
         params = params or {}
         sid = params.get("session_id") or session_id
         size, gate = _panel_context(sid)
-        stats = _ledger_stats()
-        chip_bits = []
         if size is not None and gate:
-            chip_bits.append(f"{_fmt_k(size)}/{_fmt_k(gate)}")
-        elif size is not None:
-            chip_bits.append(f"{_fmt_k(size)}")
-        if stats is not None and stats["events"] > 0:
-            chip_bits.append(_fmt_money(stats["net"]))
-        chip = " · ".join(chip_bits) if chip_bits else "idle-compact"
+            chip = "ready" if size >= gate else f"{_fmt_k(gate - size)} left"
+        else:
+            chip = "idle-compact"
         panel = _cmd_status("", session_id=sid)
         return {"chip": chip, "panel": panel}
     except Exception as exc:
@@ -1656,12 +1700,16 @@ def _fmt_ts(ts: float) -> str:
 
 
 def _panel_context(session_id: str | None) -> tuple[int | None, int | None]:
-    """(текущий размер, порог в токенах) для панели. Нет данных — None."""
+    """(текущий размер, порог в токенах) для панели. Нет данных — None.
+
+    Размер — только замер usage API из кеша. Оценка по символам занижает
+    в 2–3 раза и врёт сторону порога, поэтому фолбэка на неё нет: нет
+    замера — нет строки.
+    """
     if not session_id:
         return None, None
-    try:
-        size = _rough_tokens(session_id)
-    except Exception:
+    size = _cached_usage(session_id)
+    if size <= 0:
         return None, None
     gate = None
     try:
