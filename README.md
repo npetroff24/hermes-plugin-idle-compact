@@ -34,6 +34,10 @@ completely — your next turn re-reads the whole context at full price.
    breaks a scheduled compaction.
 7. **Windows and Linux.** One codebase: locks via `msvcrt`/`fcntl`, paths via
    `%LOCALAPPDATA%`/`~/.hermes`.
+8. **Warm everywhere, not just when idle.** The engine holds your latest
+   request, so compression that fires mid-work — threshold hit with no idle
+   time — takes the same warm path. No fresh capture — falls back to the
+   stock aux call (see How it works).
 
 Bottom line: smaller context — cheaper every answer, no waiting when idle
 compaction finishes in time, every number in the log.
@@ -189,6 +193,10 @@ Compaction archives rows (`active=0`), never deletes.
    не срывает.
 7. **Windows и Linux.** Один код: лок через `msvcrt`/`fcntl`, пути через
    `%LOCALAPPDATA%`/`~/.hermes`.
+8. **Тепло везде, а не только в простое.** Движок держит последний запрос,
+   поэтому сжатие, сработавшее прямо во время работы — порог достигнут
+   без простоя — идёт тем же тёплым путём. Свежего захвата нет — откат
+   на штатный aux-вызов (см. Логику).
 
 Итого: меньше контекст — дешевле каждый ответ, без ожидания, если сжатие успело на простое, каждая
 цифра в логе.
