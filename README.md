@@ -110,6 +110,9 @@ money saved, ledger breakdown, current size vs gate, watch state.
 `/idle-compact debug` shows internals (engine, timers, exact figures).
 Warm summaries follow the kernel's section layout; a previous summary and a
 focus topic are appended after the captured prefix, so the cache stays warm.
+The warm engine supports both summary APIs: `prompt: str` (older core) and
+`messages: [system, user]` (newer core) — the branch is picked from the live
+base-class signature.
 Desktop also shows a status-bar chip (`~185K left`, or `Ready`
 past the gate); click it for the full panel as a popup.
 The chip updates by push after every turn, so it also works over SSH,
@@ -262,7 +265,9 @@ hermes config set plugins.idle_compact.gate_fraction 0.2
 сэкономленные деньги, разбивка, текущий контекст против порога, наблюдение.
 `/idle-compact debug` — внутренности (движок, таймеры, точные цифры).
 Тёплое саммари идёт по структуре ядра; прошлое саммари и тема фокуса
-дописываются в конец запроса, поэтому кеш не ломается.
+дописываются в конец запроса, поэтому кеш не ломается. Движок поддерживает
+оба API суммирования: `prompt: str` (старое ядро) и `messages: [system, user]`
+(новое ядро) — ветка выбирается по живой сигнатуре базового класса.
 В десктопе — чип в статус-баре (`~185K left`, выше порога `Ready`); клик —
 полная панель всплывашкой. Чип обновляется push'ем после каждого хода,
 поэтому работает и по SSH, где прямой RPC отвечает `-32601`.

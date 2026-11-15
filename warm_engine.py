@@ -120,6 +120,88 @@ The first thing to do after this summary.
 """
 
 
+def _summary_api_variant(Base=None) -> str | None:
+    """Какой API суммирования у ядра: ``prompt`` (старый) или ``messages`` (новый).
+
+    Старый: ``_call_summary_llm(self, prompt: str, ...)`` — промпт строкой.
+    Новый: ``_call_summary_llm(self, messages: list, ...)`` — пара
+    ``[system, user]`` из ``_build_summary_prompt``. None — неизвестно.
+    """
+    try:
+        if Base is None:
+            Base = _import_base()
+        params = list(inspect.signature(Base._call_summary_llm).parameters)
+        if params[:3] == ["self", "prompt", "prompt_started_at"]:
+            return "prompt"
+        if params[:3] == ["self", "messages", "prompt_started_at"]:
+            return "messages"
+        return None
+    except Exception:
+        return None
+
+
+def _run_warm(_self, extra_source: str, call_super):
+    """Общая warm-логика для обоих API ядра.
+
+    ``extra_source`` — текст, из которого берём прошлое саммари и фокус
+    (строковый промпт старого API или склейка messages нового).
+    ``call_super`` — штатный путь ядра при отказе.
+    """
+    capture = route = None
+    with _self._warm_lock:
+        capture = _self._warm_capture
+        route = _self._warm_route
+
+    if capture and route:
+        try:
+            from . import policy, warm_client
+
+            # Захват мог протухнуть между планированием и вызовом:
+            # повторять старый префикс — платить полную цену.
+            cap_ts = float(route.get("_cap_ts") or 0)
+            _model = route.get("model") or getattr(_self, "model", "")
+            if cap_ts and time.time() - cap_ts > policy.capture_max_age_for(_model):
+                logger.info(
+                    "idle-warm: захват протух (%.0fс > ttl модели), идём холодным путём",
+                    time.time() - cap_ts,
+                )
+                return call_super()
+
+            text, stats = warm_client.apply_warm(
+                captured=capture,
+                prompt=WARM_INSTRUCTION + _extra_context(extra_source, getattr(_self, "_previous_summary", None)),
+                api_mode=route.get("api_mode") or _self.api_mode,
+                base_url=route.get("base_url") or _self.base_url,
+                api_key=route.get("api_key") or _self.api_key,
+                timeout=policy.REQUEST_TIMEOUT_S,
+                max_tokens=_self._warm_max_tokens(),
+                session_id=route.get("session_id"),
+                provider=route.get("provider") or getattr(_self, "provider", ""),
+            )
+            with _self._warm_lock:
+                _self._warm_stats = stats
+            logger.info(
+                "idle-warm: суммаризация по кешу — cache_read=%s свежий_вход=%s выход=%s",
+                stats.get("cache_read"), stats.get("fresh_input"), stats.get("output_tokens"),
+            )
+            return text
+        except Exception as exc:
+            # Причина отказа видна отдельной строкой: без неё в логе
+            # остаётся только «откат на aux», а что именно не так —
+            # приходится угадывать.
+            kind = "непригодный ответ" if type(exc).__name__ == "WarmRefused" else type(exc).__name__
+            logger.warning(
+                "idle-warm: отказ (%s: %s) → штатный путь", kind, exc,
+            )
+    else:
+        logger.info(
+            "idle-warm: штатный путь — warm не взведён (capture=%s route=%s)",
+            bool(capture), bool(route),
+        )
+
+    return call_super()
+
+
 class IdleWarmCompressor:
     """Фабрика: создаём класс-наследник лениво, чтобы импорт ядра не падал."""
 
@@ -199,60 +281,27 @@ class IdleWarmCompressor:
                     return self._warm_stats
 
             # ── перехват LLM-вызова суммирования ─────────────────────────
-            def _call_summary_llm(self, prompt: str, prompt_started_at: float) -> str:
-                capture = route = None
-                with self._warm_lock:
-                    capture = self._warm_capture
-                    route = self._warm_route
-
-                if capture and route:
+            # Сигнатура зависит от ревизии ядра: старый API — prompt строкой,
+            # новый — пара [system, user]. Ветку выбираем один раз при build().
+            if _summary_api_variant(Base) == "messages":
+                def _call_summary_llm(self, messages: list, prompt_started_at: float) -> str:
                     try:
-                        from . import policy, warm_client
-
-                        # Захват мог протухнуть между планированием и вызовом:
-                        # повторять старый префикс — платить полную цену.
-                        cap_ts = float(route.get("_cap_ts") or 0)
-                        _model = route.get("model") or getattr(self, "model", "")
-                        if cap_ts and time.time() - cap_ts > policy.capture_max_age_for(_model):
-                            logger.info(
-                                "idle-warm: захват протух (%.0fс > ttl модели), идём холодным путём",
-                                time.time() - cap_ts,
-                            )
-                            return super()._call_summary_llm(prompt, prompt_started_at)
-
-                        text, stats = warm_client.apply_warm(
-                            captured=capture,
-                            prompt=WARM_INSTRUCTION + _extra_context(prompt, getattr(self, "_previous_summary", None)),
-                            api_mode=route.get("api_mode") or self.api_mode,
-                            base_url=route.get("base_url") or self.base_url,
-                            api_key=route.get("api_key") or self.api_key,
-                            timeout=policy.REQUEST_TIMEOUT_S,
-                            max_tokens=self._warm_max_tokens(),
-                            session_id=route.get("session_id"),
-                            provider=route.get("provider") or getattr(self, "provider", ""),
+                        text = "\n\n".join(
+                            str(m.get("content") or "")
+                            for m in (messages or []) if isinstance(m, dict)
                         )
-                        with self._warm_lock:
-                            self._warm_stats = stats
-                        logger.info(
-                            "idle-warm: суммаризация по кешу — cache_read=%s свежий_вход=%s выход=%s",
-                            stats.get("cache_read"), stats.get("fresh_input"), stats.get("output_tokens"),
-                        )
-                        return text
-                    except Exception as exc:
-                        # Причина отказа видна отдельной строкой: без неё в логе
-                        # остаётся только «откат на aux», а что именно не так —
-                        # приходится угадывать.
-                        kind = "непригодный ответ" if type(exc).__name__ == "WarmRefused" else type(exc).__name__
-                        logger.warning(
-                            "idle-warm: отказ (%s: %s) → штатный путь", kind, exc,
-                        )
-                else:
-                    logger.info(
-                        "idle-warm: штатный путь — warm не взведён (capture=%s route=%s)",
-                        bool(capture), bool(route),
+                    except Exception:
+                        text = ""
+                    return _run_warm(
+                        self, text,
+                        lambda: super(_Engine, self)._call_summary_llm(messages, prompt_started_at),
                     )
-
-                return super()._call_summary_llm(prompt, prompt_started_at)
+            else:
+                def _call_summary_llm(self, prompt: str, prompt_started_at: float) -> str:
+                    return _run_warm(
+                        self, prompt,
+                        lambda: super(_Engine, self)._call_summary_llm(prompt, prompt_started_at),
+                    )
 
             # ── вспомогательное ──────────────────────────────────────────
             def _warm_max_tokens(self) -> int | None:
@@ -268,13 +317,13 @@ class IdleWarmCompressor:
 
 
 def signature_ok() -> tuple[bool, str]:
-    """Проверка, что ядро ещё зовёт ``_call_summary_llm(prompt, ts)``."""
+    """Проверка, что ядро зовёт известный API: ``prompt`` (старый) или ``messages`` (новый)."""
+    variant = _summary_api_variant()
+    if variant in ("prompt", "messages"):
+        return True, f"ok ({variant})"
     try:
         Base = _import_base()
-        sig = inspect.signature(Base._call_summary_llm)
-        params = list(sig.parameters)
-        if params[:3] != ["self", "prompt", "prompt_started_at"]:
-            return False, f"неожиданная сигнатура: {params[:3]}"
-        return True, "ok"
+        params = list(inspect.signature(Base._call_summary_llm).parameters)
+        return False, f"неожиданная сигнатура: {params[:3]}"
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"

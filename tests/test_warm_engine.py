@@ -132,5 +132,104 @@ class TestWarmFlag(unittest.TestCase):
         self.assertIn("→ штатный путь", joined)
 
 
+class TestMessagesApi(unittest.TestCase):
+    """Новое ядро: _call_summary_llm(self, messages, ts) — пара [system, user]."""
+
+    def _fresh(self):
+        import sys
+        import types as _types
+        src = (PLUGIN_DIR / "warm_engine.py").read_text(encoding="utf-8")
+        pkg = _types.ModuleType("wepkg_fake")
+        pkg.__path__ = []
+        policy = _types.SimpleNamespace(
+            capture_max_age_for=lambda m: 10 ** 9, REQUEST_TIMEOUT_S=30)
+        calls = {}
+        wc = _types.ModuleType("wepkg_fake.warm_client")
+
+        class _WarmRefused(RuntimeError):
+            pass
+
+        def _apply_warm(**kw):
+            calls.update(kw)
+            return "warm-summary", {"cache_read": 1, "fresh_input": 2,
+                                    "output_tokens": 3}
+        wc.apply_warm = _apply_warm
+        wc.WarmRefused = _WarmRefused
+        pkg.policy = policy
+        pkg.warm_client = wc
+        old = {k: sys.modules.get(k) for k in
+               ("wepkg_fake", "wepkg_fake.policy", "wepkg_fake.warm_client")}
+        sys.modules["wepkg_fake"] = pkg
+        sys.modules["wepkg_fake.policy"] = policy
+        sys.modules["wepkg_fake.warm_client"] = wc
+
+        def _restore():
+            for k, v in old.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+            sys.modules.pop("wepkg_fake.warm_engine", None)
+        self.addCleanup(_restore)
+
+        class FakeBase:
+            def __init__(self, **kw):
+                for k, v in kw.items():
+                    setattr(self, k, v)
+            def _call_summary_llm(self, messages, prompt_started_at):
+                self.aux_messages = messages
+                return "aux-summary"
+            def update_model(self, *a, **k):
+                pass
+
+        spec = importlib.util.spec_from_file_location(
+            "wepkg_fake.warm_engine", PLUGIN_DIR / "warm_engine.py")
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["wepkg_fake.warm_engine"] = mod
+        spec.loader.exec_module(mod)
+        mod._import_base = lambda: FakeBase
+        mod.IdleWarmCompressor._cls = None
+        engine_cls = mod.IdleWarmCompressor.build()
+        return mod, engine_cls, calls
+
+    def _make(self, engine_cls):
+        return engine_cls(model="m", base_url="https://x/v1", api_key="k",
+                          provider="p", api_mode="chat_completions",
+                          config_context_length=100000)
+
+    def test_variant_detected(self):
+        mod, _engine_cls, _calls = self._fresh()
+        self.assertEqual(mod._summary_api_variant(), "messages")
+        ok, why = mod.signature_ok()
+        self.assertTrue(ok)
+        self.assertIn("messages", why)
+
+    def test_warm_path_with_messages(self):
+        _mod, engine_cls, calls = self._fresh()
+        e = self._make(engine_cls)
+        e.begin_warm({"messages": [{"role": "user", "content": "hi"}]},
+                     {"base_url": "https://x/v1", "api_mode": "chat_completions",
+                      "api_key": "k", "model": "m"})
+        out = e._call_summary_llm([
+            {"role": "system", "content": 'sys\n\nFOCUS TOPIC: "тема"'},
+            {"role": "user", "content": "PREVIOUS SUMMARY:\nстарое\n\nNEW TURNS TO INCORPORATE:\nновое"},
+        ], 0.0)
+        self.assertEqual(out, "warm-summary")
+        prompt = calls.get("prompt", "")
+        self.assertIn("## Goal", prompt)
+        self.assertIn("старое", prompt)
+        self.assertNotIn("новое", prompt)
+        self.assertIn('FOCUS TOPIC: "тема"', prompt)
+
+    def test_no_warm_falls_back(self):
+        _mod, engine_cls, _calls = self._fresh()
+        e = self._make(engine_cls)
+        out = e._call_summary_llm([{"role": "system", "content": "s"},
+                                   {"role": "user", "content": "u"}], 0.0)
+        self.assertEqual(out, "aux-summary")
+        self.assertEqual(len(e.aux_messages), 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
