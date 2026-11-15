@@ -1171,21 +1171,21 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None,
             # живой агент без причины) и только когда в кеше лежит тот же
             # объект. Проверка неатомарна — это best-effort, как и в ядре;
             # не смогли подтвердить совпадение — не трогаем.
-            if not did_compress or runner is None:
-                return
-            evict = getattr(runner, "_evict_cached_agent", None)
-            if callable(evict):
-                try:
-                    same = False
+            # (без return: return в finally глушит летящее исключение.)
+            if did_compress and runner is not None:
+                evict = getattr(runner, "_evict_cached_agent", None)
+                if callable(evict):
                     try:
-                        from gateway.run import _cached_agent_for_hygiene
-                        same = _cached_agent_for_hygiene(runner, route) is agent
-                    except Exception:
                         same = False
-                    if same:
-                        evict(route)
-                except Exception:
-                    pass
+                        try:
+                            from gateway.run import _cached_agent_for_hygiene
+                            same = _cached_agent_for_hygiene(runner, route) is agent
+                        except Exception:
+                            same = False
+                        if same:
+                            evict(route)
+                    except Exception:
+                        pass
 
     th = threading.Thread(target=work, daemon=True, name=f"idle-compact-{session_id[:8]}")
     th.start()
