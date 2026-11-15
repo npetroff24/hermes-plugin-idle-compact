@@ -264,7 +264,7 @@ class TestRpcStatus(StatusBase):
             json.dumps({"s1": {"tokens": 500000, "ts": time.time()}}),
             encoding="utf-8")
         res = mod._rpc_status({"session_id": "s1"})
-        self.assertEqual(res["chip"], "ready")
+        self.assertEqual(res["chip"], "Ready")
 
     def test_rpc_empty_home(self):
         mod, _home = self._mod_with_home()
