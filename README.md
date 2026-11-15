@@ -105,6 +105,10 @@ hermes config set plugins.idle_compact.gate_fraction 0.2
 
 Works on Windows and Linux.
 
+Check status any time with `/idle-compact` in chat (read-only):
+engine and timers in this process, live watches, gate vs current
+size, and the signed savings ledger.
+
 ## Rollback
 
 ```bash
@@ -247,6 +251,10 @@ hermes config set plugins.idle_compact.gate_fraction 0.2
 ```
 
 Работает на Windows и Linux.
+
+Состояние — командой `/idle-compact` в чате (только чтение):
+движок и таймеры этого процесса, живое наблюдение, порог против
+текущего размера и учёт экономии со знаком (в плюс / зря).
 
 ## Откат
 

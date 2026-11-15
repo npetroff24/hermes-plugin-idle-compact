@@ -198,7 +198,7 @@ GATE_TOKENS = int(THRESHOLD_TOKENS * TARGET_RATIO * GATE_K)  # = 150000
 _warned_no_config = False
 
 
-def _live_target(window_tokens: int | None = None) -> int | None:
+def _live_target(window_tokens: int | None = None, cfg: dict | None = None) -> int | None:
     """Живая цель из config.yaml. Нет конфига — None (скип, не вшитое).
 
     Понимает оба вида порога: ``threshold_tokens`` (абсолютные токены) и
@@ -211,7 +211,8 @@ def _live_target(window_tokens: int | None = None) -> int | None:
     """
     global _warned_no_config
     try:
-        cfg = _read_config()
+        if cfg is None:
+            cfg = _read_config()
         if cfg is None:
             raise ValueError("config.yaml unreadable")
         comp = cfg.get("compression") or {}
@@ -241,19 +242,22 @@ def _live_target(window_tokens: int | None = None) -> int | None:
         return None
 
 
-def _plugin_cfg() -> dict:
+def _plugin_cfg(cfg: dict | None = None) -> dict:
     """Секция plugins.idle_compact из config.yaml (или пустой словарь)."""
     try:
-        cfg = _read_config()
+        if cfg is None:
+            cfg = _read_config()
         return ((cfg.get("plugins") or {}).get("idle_compact") or {}) if isinstance(cfg, dict) else {}
     except Exception:
         return {}
 
 
-def _hub_auto_ratio() -> float:
+def _hub_auto_ratio(cfg: dict | None = None) -> float:
     """Порог автосжатия из хаба настроек (`plugins.entries.*.settings`)."""
     try:
-        cfg = _read_config() or {}
+        if cfg is None:
+            cfg = _read_config()
+        cfg = cfg or {}
         entries = (cfg.get("plugins") or {}).get("entries") or {}
         if not isinstance(entries, dict):
             return 0.0
@@ -274,18 +278,20 @@ def _hub_auto_ratio() -> float:
     return 0.0
 
 
-def _gate_fraction(session_id: str | None = None) -> float:
+def _gate_fraction(session_id: str | None = None, cfg: dict | None = None) -> float:
     """Доля окна модели, после которой включается фоновое сжатие.
 
     Порядок: хаб настроек → ``<HERMES_HOME>/idle_compact_test.json`` (поле
     ``gate_fraction``) → ``plugins.idle_compact.gate_fraction`` в config.yaml.
     Ноль/нет — работает прежняя формула 2 × цель.
     """
-    hub = _hub_auto_ratio()
+    if cfg is None:
+        cfg = _read_config()
+    hub = _hub_auto_ratio(cfg)
     if hub > 0:
         return hub
     test = _test_settings(session_id)
-    for src in (test.get("gate_fraction"), _plugin_cfg().get("gate_fraction")):
+    for src in (test.get("gate_fraction"), _plugin_cfg(cfg).get("gate_fraction")):
         try:
             if src is not None and float(src) > 0:
                 return float(src)
@@ -294,21 +300,23 @@ def _gate_fraction(session_id: str | None = None) -> float:
     return 0.0
 
 
-def _live_gate(comp=None, session_id: str | None = None) -> int | None:
+def _live_gate(comp=None, session_id: str | None = None, cfg: dict | None = None) -> int | None:
     test = _test_settings(session_id)
     if test.get("gate"):
         try:
             return int(test["gate"])
         except Exception:
             pass
-    frac = _gate_fraction(session_id)
+    if cfg is None:
+        cfg = _read_config()
+    frac = _gate_fraction(session_id, cfg)
     if frac > 0:
         window = int(getattr(comp, "context_length", 0) or 0)
         if window > 0:
             # Порог от ФАКТИЧЕСКОГО окна модели: не зависит от lean/legacy,
             # threshold и target_ratio — одна понятная величина.
             return int(frac * window)
-    target = _live_target()
+    target = _live_target(cfg=cfg)
     return int(target * GATE_K) if target else None
 
 
@@ -317,7 +325,7 @@ def _ttl_for_model(model: str) -> int:
     return policy.ttl_for(model)
 
 
-def _evict_ttl() -> float:
+def _evict_ttl(cfg: dict | None = None) -> float:
     """TTL выселения агента из кеша gateway: config agent.agent_cache.idle_ttl_secs.
 
     Дефолт — ``policy.AGENT_CACHE_IDLE_TTL_DEFAULT_S`` (значение ядра).
@@ -325,7 +333,8 @@ def _evict_ttl() -> float:
     раньше выселения — иначе «agent evicted/absent» и скип.
     """
     try:
-        cfg = _read_config()
+        if cfg is None:
+            cfg = _read_config()
         sec = ((cfg.get("agent") or {}).get("agent_cache") or {}) if isinstance(cfg, dict) else {}
         val = float(sec.get("idle_ttl_secs") or 0)
         if val > 0:
@@ -335,7 +344,7 @@ def _evict_ttl() -> float:
     return policy.AGENT_CACHE_IDLE_TTL_DEFAULT_S
 
 
-def _delay_for_model(model: str, session_id: str | None = None) -> float:
+def _delay_for_model(model: str, session_id: str | None = None, cfg: dict | None = None) -> float:
     test = _test_settings(session_id)
     if test.get("seconds"):
         try:
@@ -345,7 +354,9 @@ def _delay_for_model(model: str, session_id: str | None = None) -> float:
     # Задержка = min(TTL модели, TTL выселения агента) x запас: сжатие идёт
     # пока живы И провайдерский кеш, И агент в памяти gateway.
     model_ttl = _ttl_for_model(model)
-    evict = _evict_ttl()
+    if cfg is None:
+        cfg = _read_config()
+    evict = _evict_ttl(cfg)
     if model_ttl > evict and model not in _warned_evict_cap:
         _warned_evict_cap.add(model)
         logger.warning(
@@ -849,7 +860,8 @@ def _on_session_end(session_id: str = "", **kwargs) -> None:
         )
         return
     model = row.get("model") or ""
-    delay = _delay_for_model(model, session_id)
+    cfg = _read_config()  # один парс на вызов хука — дальше только проброс
+    delay = _delay_for_model(model, session_id, cfg)
     stamp = time.time()
     try:
         from contextvars import copy_context
@@ -865,7 +877,7 @@ def _on_session_end(session_id: str = "", **kwargs) -> None:
         _timers[session_id] = t
         t.start()
     _remember(session_id, stamp + delay, stamp, model)
-    gate = _live_gate(session_id=session_id)
+    gate = _live_gate(session_id=session_id, cfg=cfg)
     logger.info(
         "idle-compact: timer %.0fs for session %s model %s (gate %s | test=%s ttl=%s)",
         delay, session_id, model, gate if gate is not None else "n/a",
@@ -890,7 +902,8 @@ def _gate_floor(compressor, session_id: str | None = None) -> int | None:
             target = int(thr * ratio)
     except Exception:
         target = None
-    frac = _gate_fraction(session_id)
+    _gcfg = _read_config()  # один парс — дальше только проброс
+    frac = _gate_fraction(session_id, _gcfg)
     window_now = int(getattr(compressor, "context_length", 0) or 0)
     if frac > 0 and window_now > 0:
         # Порог от окна модели — приоритетнее цели и режима.
@@ -898,7 +911,7 @@ def _gate_floor(compressor, session_id: str | None = None) -> int | None:
     if target is None:
         # Фактическое окно модели из живого компрессора — не выдуманное.
         window = int(getattr(compressor, "context_length", 0) or 0)
-        target = _live_target(window_tokens=window or None)
+        target = _live_target(window_tokens=window or None, cfg=_gcfg)
     if target is None:
         return None
     floor = int(target * GATE_K)
@@ -1392,6 +1405,161 @@ def _start_watchdog() -> None:
     logger.info("idle-compact: часовой запущен (проверка раз в 30 сек)")
 
 
+_STATUS_VERSION = "?"  # захватывается в register() из ctx.manifest.version
+
+
+def _pending_live(now: float | None = None) -> tuple[list, int]:
+    """Живые записи pending: pid владельца жив, дедлайн в будущем и сессия есть в БД.
+
+    Только чтение. Фантомы (мёртвый pid, просроченный дедлайн, мусор
+    ручных проб) в живые не попадают, но и не удаляются здесь.
+    Проверка сессии в БД нужна, т.к. pid на Windows переиспользуются:
+    мёртвый владелец + чужой свежий pid давали ложно-живые записи.
+    """
+    if now is None:
+        now = time.time()
+    try:
+        state = _load_pending()
+    except Exception:
+        return [], 0
+    live = []
+    for sid, entry in state.items():
+        try:
+            if not _pid_alive(int((entry or {}).get("pid") or 0)):
+                continue
+            if float((entry or {}).get("deadline") or 0) <= now:
+                continue
+            if _session_row(sid) is None:
+                continue
+            live.append(sid)
+        except Exception:
+            continue
+    return live, len(state)
+
+
+def _ledger_stats() -> dict | None:
+    """Агрегат леджера за всё время. Только чтение, O(размер файла).
+
+    Деньги знаковые: ``saved_usd`` положителен, когда сжатие окупилось,
+    и отрицателен, когда кеш и так был бы тёплым («зря»).
+    """
+    try:
+        import json
+
+        from . import savings
+
+        path = savings.ledger_path()
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+    except Exception:
+        return None
+    plus_n = waste_n = n = 0
+    plus = waste = 0.0
+    last_settle = 0.0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except Exception:
+            continue
+        n += 1
+        try:
+            amount = float(event.get("saved_usd") or 0)
+        except Exception:
+            amount = 0.0
+        if amount > 0:
+            plus_n += 1
+            plus += amount
+        elif amount < 0:
+            waste_n += 1
+            waste += amount
+        if event.get("event") == "settle":
+            try:
+                ts = float(event.get("ts") or 0)
+            except Exception:
+                ts = 0.0
+            if ts > last_settle:
+                last_settle = ts
+    return {
+        "events": n, "plus_n": plus_n, "plus": plus,
+        "waste_n": waste_n, "waste": waste, "net": plus + waste,
+        "last_settle": last_settle,
+    }
+
+
+def _cmd_status(raw_args: str = "", session_id: str | None = None) -> str:
+    """Хендлер ``/idle-compact``: панель статуса. Строго read-only.
+
+    Правда — из файлов (pending, леджер); память этого процесса помечена
+    явно. Ничего не создаёт: ни таймеров, ни записей, ни сессий.
+    """
+    lines = [f"idle-compact {_STATUS_VERSION}"]
+    try:
+        engine = "да" if _WARM_ENGINE is not None else "нет"
+    except Exception:
+        engine = "unknown"
+    lines.append(f"warm-движок: {engine} (этот процесс)")
+    try:
+        with _timers_lock:
+            timers = len(_timers)
+        lines.append(f"таймеры: {timers} (этот процесс)")
+    except Exception:
+        lines.append("таймеры: unknown (этот процесс)")
+    try:
+        live, total = _pending_live()
+        lines.append(f"наблюдение (файл): {len(live)} живых из {total}")
+    except Exception:
+        lines.append("наблюдение (файл): unknown")
+    try:
+        cpanel = _read_config()
+        gate = _live_gate(session_id=session_id, cfg=cpanel)
+    except Exception:
+        gate = None
+        cpanel = None
+    if gate:
+        lines.append(f"порог: ~{gate} токенов")
+    else:
+        try:
+            frac = _gate_fraction(session_id, cpanel)
+        except Exception:
+            frac = 0.0
+        if frac > 0:
+            lines.append(f"порог: {frac:g} окна модели (окно неизвестно)")
+        else:
+            lines.append("порог: n/a")
+    if session_id:
+        try:
+            lines.append(f"сейчас: ~{_rough_tokens(session_id)} токенов")
+        except Exception:
+            lines.append("сейчас: unknown")
+    else:
+        lines.append("сейчас: unknown (нет сессии)")
+    stats = _ledger_stats()
+    if stats is None:
+        lines.append("счёт: unknown")
+    else:
+        lines.append(
+            "счёт: событий %(events)d, в плюс %(plus_n)d (+$%(plus).5f), "
+            "зря %(waste_n)d (-$%(waste_abs).5f), итог $%(net)+.5f" % {
+                "events": stats["events"], "plus_n": stats["plus_n"],
+                "plus": stats["plus"], "waste_n": stats["waste_n"],
+                "waste_abs": abs(stats["waste"]), "net": stats["net"],
+            }
+        )
+        if stats["last_settle"] > 0:
+            try:
+                from datetime import datetime
+
+                when = datetime.fromtimestamp(stats["last_settle"]).strftime("%d.%m %H:%M")
+            except Exception:
+                when = "unknown"
+            lines.append(f"последний счёт: {when}")
+        else:
+            lines.append("последний счёт: пока нет (сжатие попадёт в счёт после первого живого хода)")
+    return "\n".join(lines)
+
+
 def _plugin_version() -> str:
     """Версия из plugin.yaml — единственное место, где она задана."""
     try:
@@ -1405,7 +1573,7 @@ def register(ctx) -> None:
     """Точка входа плагина: движок, хук конца хода и хук захвата запроса."""
     # Свой контекст-движок: штатный компрессор + warm-путь суммирования.
     # Если не удастся зарегистрировать — плагин продолжит работать как раньше (aux-путь).
-    global _WARM_ENGINE
+    global _WARM_ENGINE, _STATUS_VERSION
     try:
         from .warm_engine import IdleWarmCompressor, signature_ok
 
@@ -1457,6 +1625,14 @@ def register(ctx) -> None:
         ctx.register_hook("post_api_request", savings.on_post_api_request)
     except Exception:
         logger.exception("idle-compact: savings hooks not registered")
+    try:
+        _STATUS_VERSION = str(getattr(getattr(ctx, "manifest", None), "version", "?") or "?")
+        reg_cmd = getattr(ctx, "register_command", None)
+        if callable(reg_cmd):
+            reg_cmd("idle-compact", _cmd_status,
+                    description="idle-compact: состояние плагина (только чтение)")
+    except Exception:
+        logger.debug("idle-compact: command registration skipped", exc_info=True)
     logger.info(
         "idle-compact %s loaded: DRY_RUN=%s WRITE_ENABLED=%s gate=live-per-fire",
         _plugin_version(), DRY_RUN, WRITE_ENABLED,

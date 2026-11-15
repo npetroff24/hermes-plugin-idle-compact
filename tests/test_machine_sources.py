@@ -71,6 +71,14 @@ class TestTimerGating(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mod = load_init()
+        # ВАЖНО: _on_session_end пишет pending через _home() — без изоляции
+        # каждый прогон перевооружал 4 фантома (s-discord/s-gui/s-telegram/
+        # s-zzz_future, model "x") в БОЕВОМ файле.
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._tmp.cleanup)
+        home = Path(cls._tmp.name)
+        (home / "config.yaml").write_text("other: 1\n", encoding="utf-8")
+        cls.mod._home = lambda: home  # type: ignore[attr-defined]
 
     def _no_timer_for(self, source):
         m = self.mod
