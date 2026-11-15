@@ -239,7 +239,15 @@ class IdleWarmCompressor:
                         )
                         return text
                     except Exception as exc:
-                        logger.warning("idle-warm: warm-путь недоступен (%s), откат на aux", exc)
+                        # Причина отказа видна отдельной строкой: без неё в логе
+                        # остаётся только «откат на aux», а что именно не так —
+                        # приходится угадывать.
+                        kind = "непригодный ответ" if isinstance(
+                            exc, getattr(warm_client, "WarmRefused", ())
+                        ) else type(exc).__name__
+                        logger.warning(
+                            "idle-warm: отказ (%s: %s) → штатный путь", kind, exc,
+                        )
                 else:
                     logger.info(
                         "idle-warm: штатный путь — warm не взведён (capture=%s route=%s)",

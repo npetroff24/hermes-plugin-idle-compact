@@ -113,6 +113,24 @@ class TestWarmFlag(unittest.TestCase):
             e.end_warm()
         self.assertEqual(out, "aux-fallback")
 
+    def test_refusal_logs_reason(self):
+        """Причина отказа попадает в лог отдельной строкой, а не только «откат»."""
+        e = self._make()
+        e.begin_warm({"messages": []}, {"base_url": "https://x/v1",
+                                        "api_mode": "chat_completions", "api_key": "k"})
+        base = type(e).__mro__[1]
+        original = base._call_summary_llm
+        base._call_summary_llm = lambda self, p, t: "aux"
+        try:
+            with self.assertLogs("hermes_plugins.idle_compact.warm_engine", level="WARNING") as logs:
+                e._call_summary_llm("prompt", 0.0)
+        finally:
+            base._call_summary_llm = original
+            e.end_warm()
+        joined = "\n".join(logs.output)
+        self.assertIn("idle-warm: отказ", joined)
+        self.assertIn("→ штатный путь", joined)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
