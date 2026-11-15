@@ -48,7 +48,8 @@ function isUnknownMethod(e) {
 
 async function fetchStatus() {
   const params = {}
-  const sid = currentSessionId()
+  // RPC-путь (_resident_desktop) ищет по агентскому ключу, а не по runtime id.
+  const sid = storedSessionId() || currentSessionId()
   if (sid) {
     params.session_id = sid
   }
@@ -59,6 +60,40 @@ async function fetchStatus() {
   return {
     chip: typeof res.chip === 'string' ? res.chip : 'idle-compact',
     panel: typeof res.panel === 'string' ? res.panel : ''
+  }
+}
+
+function storedSessionId() {
+  try {
+    const s = host.state && host.state.focusedStoredSessionId
+    return (s && typeof s.get === 'function' ? s.get() : null) || null
+  } catch (e) {
+    return null
+  }
+}
+
+function matchSession(p) {
+  if (!p || (!p.session_id && !p.session_key && !p.agent_session_id)) {
+    return true
+  }
+  try {
+    const ids = []
+    const a = host.state && host.state.activeSessionId
+    if (a && typeof a.get === 'function' && a.get()) {
+      ids.push(a.get())
+    }
+    const s = host.state && host.state.focusedStoredSessionId
+    if (s && typeof s.get === 'function' && s.get()) {
+      ids.push(s.get())
+    }
+    if (ids.length === 0) {
+      return true
+    }
+    return [p.session_id, p.session_key, p.agent_session_id].some(
+      (v) => typeof v === 'string' && v && ids.indexOf(v) >= 0
+    )
+  } catch (e) {
+    return true
   }
 }
 
@@ -145,7 +180,7 @@ export default {
         if (typeof p.chip !== 'string') {
           return
         }
-        if (p.session_id && p.session_id !== currentSessionId()) {
+        if (!matchSession(p)) {
           return
         }
         data.set({

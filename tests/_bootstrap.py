@@ -14,6 +14,11 @@ import os
 import sys
 from pathlib import Path
 
+# Тесты не должны уходить в перезапуск под другой интерпретатор, когда
+# импорт ядра дёргает prepare_launch (relaunch sys.argv под tools/python
+# плодит вложенные прогоны сьюты и ломает счёт). Только для тестов.
+os.environ.setdefault("HERMES_DISABLE_LAZY_INSTALLS", "1")
+
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 if str(PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(PLUGIN_DIR))
