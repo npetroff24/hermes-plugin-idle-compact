@@ -124,7 +124,9 @@ function Chip({ data }) {
       return
     }
     if (rpcUnsupported) {
-      host.notify({ durationMs: TOAST_MS, kind: 'info', message: 'idle-compact status lives in chat — run /idle-compact', title: 'idle-compact' })
+      toastShown = true
+      toastAt = Date.now()
+      host.notify({ durationMs: TOAST_MS, id: TOAST_ID, kind: 'info', message: 'idle-compact status lives in chat — run /idle-compact', onDismiss: () => { toastShown = false }, title: 'idle-compact' })
       return
     }
     try {
@@ -143,7 +145,9 @@ function Chip({ data }) {
     } catch (e) {
       if (isUnknownMethod(e)) {
         rpcUnsupported = true
-        host.notify({ durationMs: TOAST_MS, kind: 'info', message: 'idle-compact status lives in chat — run /idle-compact', title: 'idle-compact' })
+        toastShown = true
+        toastAt = Date.now()
+        host.notify({ durationMs: TOAST_MS, id: TOAST_ID, kind: 'info', message: 'idle-compact status lives in chat — run /idle-compact', onDismiss: () => { toastShown = false }, title: 'idle-compact' })
         return
       }
       const detail = (e && (e.message || e.data || e.code)) || e
