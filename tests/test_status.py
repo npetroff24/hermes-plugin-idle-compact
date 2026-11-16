@@ -456,6 +456,21 @@ class TestResidentWarnOnce(StatusBase):
             mod._resident_reason("s1", "r1")
         self.assertEqual(len(again.records), 1)
 
+    def test_once_info_key_ignores_volatile_text(self):
+        mod, _home = self._mod_with_home()
+        with self.assertLogs(mod.logger, level="INFO") as first:
+            mod._once_info("s1", "k", "msg %s", "v1")
+        self.assertEqual(len(first.records), 1)
+        with self.assertNoLogs(mod.logger, level="INFO"):
+            mod._once_info("s1", "k", "msg %s", "v2")
+
+    def test_resident_reason_ignores_registry_churn(self):
+        mod, _home = self._mod_with_home()
+        with self.assertLogs(mod.logger, level="INFO"):
+            mod._resident_reason("s1", "desktop registry has no match (keys: ['a'])")
+        with self.assertNoLogs(mod.logger, level="INFO"):
+            mod._resident_reason("s1", "desktop registry has no match (keys: ['a', 'b'])")
+
 
 if __name__ == "__main__":
     unittest.main()

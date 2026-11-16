@@ -773,24 +773,43 @@ _last_warm_usage: dict | None = None
 _history_db = None
 
 
-def _resident_reason(session_id: str, reason: str) -> None:
-    """Причина отсутствия агента.
+def _once_info(session_id: str, kind: str, msg: str, *args) -> None:
+    """Один INFO на пару (сессия, вид), повторы — в debug.
 
-    Один INFO на пару (сессия, причина), повторы — в debug: построчный INFO
-    при опросе статуса уходит в канал ошибок десктопа и топит его спамом
-    («нет живого агента» ×2 на каждый опрос чужой сессии). Разные причины
-    видны все — каждая по разу; при появлении живого агента пометки
-    сбрасываются (см. ``_resident_found``), следующий простой снова
-    предупредит один раз.
+    Построчный INFO из хуков (post_api идёт на каждый ход) уходит в канал
+    ошибок десктопа и дальше мостом в Telegram. Ключ — статичный вид,
+    а не полный текст: в текст попадают волатильные данные (состав реестра),
+    и ключ из полного текста не срабатывал бы повторно.
     """
-    key = (session_id, reason)
+    key = (session_id, kind)
     if key in _warned_resident:
-        logger.debug("idle-compact: нет живого агента для %s — %s", session_id, reason)
+        logger.debug(msg, *args)
         return
     if len(_warned_resident) > 2000:
         _warned_resident.clear()
     _warned_resident.add(key)
-    logger.info("idle-compact: нет живого агента для %s — %s", session_id, reason)
+    logger.info(msg, *args)
+
+
+def _resident_reason(session_id: str, reason: str) -> None:
+    """Причина отсутствия агента.
+
+    Один INFO на пару (сессия, причина), повторы — в debug: построчный INFO
+    при опросе статуса уходит в канал ошибок десктопа и дальше мостом
+    в Telegram («нет живого агента» ×2 на каждый опрос чужой сессии).
+    Разные причины видны все — каждая по разу; при появлении живого агента
+    пометки сбрасываются (см. ``_resident_found``), следующий простой снова
+    предупредит один раз. Волатильный хвост причины (состав реестра)
+    в ключ не входит — только в текст строки.
+    """
+    kind = "resident:" + reason.split(" (keys:")[0]
+    _once_info(
+        session_id,
+        kind,
+        "idle-compact: нет живого агента для %s — %s",
+        session_id,
+        reason,
+    )
 
 
 def _resident_found(session_id: str) -> None:
@@ -1001,25 +1020,33 @@ def _arm_engine(session_id: str) -> None:
     """
     cap = _capture_for(session_id)
     if not cap:
-        logger.info("idle-compact: взвод пропущен — нет свежего захвата сессии %s", session_id[:24])
+        _once_info(
+            session_id, "arm:no-capture",
+            "idle-compact: взвод пропущен — нет свежего захвата сессии %s", session_id[:24],
+        )
         return
     ts = float(cap.get("ts") or 0)
     model = cap.get("model") or ""
     # Старше окна кеша повтор бессмыслен: префикса уже нет у провайдера.
     if not ts or time.time() - ts > policy.arm_window_for(model):
-        logger.info(
+        _once_info(
+            session_id, "arm:stale-capture",
             "idle-compact: взвод пропущен — захват старее окна (%.0fс > %.0fс) для %s",
             time.time() - ts, policy.arm_window_for(model), session_id[:24],
         )
         return
     found = _resident(session_id)
     if not found:
-        logger.info("idle-compact: взвод пропущен — агент не найден в этом процессе (%s)", session_id[:24])
+        _once_info(
+            session_id, "arm:no-agent",
+            "idle-compact: взвод пропущен — агент не найден в этом процессе (%s)", session_id[:24],
+        )
         return
     agent, comp, _route, _runner = found
     begin = getattr(comp, "begin_warm", None)
     if not callable(begin):
-        logger.info(
+        _once_info(
+            session_id, "arm:no-begin",
             "idle-compact: взвод пропущен — у компрессора нет begin_warm (%s)",
             type(comp).__name__,
         )
