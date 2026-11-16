@@ -681,6 +681,7 @@ def _resident(session_id: str):
     if comp is None:
         _resident_reason(session_id, "agent has no context_compressor")
         return None
+    _resident_found(session_id)
     return agent, comp, route, runner
 
 
@@ -702,12 +703,15 @@ def _resident_desktop(session_id: str):
         _resident_reason(session_id, f"tui_gateway._sessions is {type(sessions).__name__}")
         return None
     # Подробный снимок реестра: без него не видно, почему сессия не находится.
+    # В debug, а не INFO: этот вызов идёт на каждый опрос статуса, а построчный
+    # INFO уходит в канал ошибок десктопа. На промахе ниже всё равно пишется
+    # одноразовый INFO с ключами реестра.
     try:
         _snap = []
         for _k, _s in list(sessions.items())[:8]:
             _a = _s.get("agent") if isinstance(_s, dict) else None
             _snap.append(f"{str(_k)[:12]}→{getattr(_a, 'session_id', None)}")
-        logger.info(
+        logger.debug(
             "idle-compact: реестр desktop — сессий=%d, ищем=%s, состав=%s",
             len(sessions), session_id[-12:], "; ".join(_snap) or "пусто",
         )
@@ -728,6 +732,7 @@ def _resident_desktop(session_id: str):
                     f"{sum(1 for a in dir(agent) if 'compress' in a.lower())} similar attrs)",
                 )
                 return None
+            _resident_found(session_id)
             return agent, comp, str(sess.get("session_key") or session_id), None
     _resident_reason(
         session_id,
@@ -771,11 +776,30 @@ _history_db = None
 def _resident_reason(session_id: str, reason: str) -> None:
     """Причина отсутствия агента.
 
-    Логируем каждый раз: одноразовый лог уже стоил нескольких циклов отладки —
-    первая причина оставалась в прошлом, а последующие срабатывания молчали.
-    Таймер срабатывает раз в несколько минут, спама это не даёт.
+    Один INFO на пару (сессия, причина), повторы — в debug: построчный INFO
+    при опросе статуса уходит в канал ошибок десктопа и топит его спамом
+    («нет живого агента» ×2 на каждый опрос чужой сессии). Разные причины
+    видны все — каждая по разу; при появлении живого агента пометки
+    сбрасываются (см. ``_resident_found``), следующий простой снова
+    предупредит один раз.
     """
+    key = (session_id, reason)
+    if key in _warned_resident:
+        logger.debug("idle-compact: нет живого агента для %s — %s", session_id, reason)
+        return
+    if len(_warned_resident) > 2000:
+        _warned_resident.clear()
+    _warned_resident.add(key)
     logger.info("idle-compact: нет живого агента для %s — %s", session_id, reason)
+
+
+def _resident_found(session_id: str) -> None:
+    """Агент нашёлся: сбросить одноразовые пометки, чтобы следующий простой
+    снова предупредил один раз, а не молчал вечно."""
+    if _warned_resident:
+        _warned_resident.difference_update(
+            [k for k in list(_warned_resident) if k[0] == session_id]
+        )
 
 
 def _history_getter(comp):

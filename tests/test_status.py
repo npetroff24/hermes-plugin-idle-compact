@@ -436,5 +436,26 @@ class TestSingleParse(StatusBase):
         self.assertAlmostEqual(mod._evict_ttl(cfg), mod.policy.AGENT_CACHE_IDLE_TTL_DEFAULT_S)
 
 
+class TestResidentWarnOnce(StatusBase):
+    def test_reason_info_once_per_session_reason(self):
+        mod, _home = self._mod_with_home()
+        with self.assertLogs(mod.logger, level="INFO") as first:
+            mod._resident_reason("s1", "r1")
+        self.assertEqual(len(first.records), 1)
+        with self.assertNoLogs(mod.logger, level="INFO"):
+            mod._resident_reason("s1", "r1")
+        with self.assertLogs(mod.logger, level="INFO") as second:
+            mod._resident_reason("s1", "r2")
+        self.assertEqual(len(second.records), 1)
+
+    def test_found_resets_warnings(self):
+        mod, _home = self._mod_with_home()
+        mod._resident_reason("s1", "r1")
+        mod._resident_found("s1")
+        with self.assertLogs(mod.logger, level="INFO") as again:
+            mod._resident_reason("s1", "r1")
+        self.assertEqual(len(again.records), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
