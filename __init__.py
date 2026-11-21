@@ -434,6 +434,69 @@ def scan_candidates() -> list[dict]:
 _timers: dict[str, threading.Timer] = {}
 _timers_lock = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# Guard от двойного сжатия: ядро сжало — мы пропускаем
+# ---------------------------------------------------------------------------
+
+# Сколько секунд помним ядерное сжатие сессии — см. policy.py.
+_CORE_COMPACTION_TTL_S = policy.CORE_COMPACTION_TTL_S
+
+# {session_id: (когда ядро сжало, размер после)} — только в памяти:
+# таймеры тоже не переживают рестарт, хранить на диске нечего.
+_core_compactions: dict[str, tuple[float, int | None]] = {}
+_core_compactions_lock = threading.Lock()
+
+
+def _on_post_compaction(session_id=None, old_session_id=None, after_tokens=None,
+                        reason=None, **kw) -> None:
+    """Ядро сжало сессию: запоминаем, чтобы таймер её пропустил.
+
+    Публичный хук ``post_compaction`` (см. VALID_HOOKS): reason несёт триггер
+    (``cache_expiry`` — ядерное сжатие в простое), after_tokens — свежий размер.
+    Пишем оба id: ядро иногда продолжает беседу в дочерней сессии.
+    """
+    try:
+        now = time.time()
+        after = int(after_tokens) if after_tokens is not None else None
+    except Exception:
+        return
+    ids = [i for i in (session_id, old_session_id) if i]
+    if not ids:
+        return
+    with _core_compactions_lock:
+        for sid in ids:
+            _core_compactions[str(sid)] = (now, after)
+        # Чистка старья заодно: словарь не растёт без bound.
+        cutoff = now - _CORE_COMPACTION_TTL_S
+        for sid in [s for s, (ts, _) in _core_compactions.items() if ts < cutoff]:
+            del _core_compactions[sid]
+    logger.info(
+        "idle-compact: ядро сжало %s (reason=%s, after=%s) — guard взведён",
+        session_id, reason, after,
+    )
+
+
+def _core_record(session_id: str) -> tuple[float, int | None] | None:
+    """Запись о ядерном сжатии сессии или None (протухшие стираем)."""
+    with _core_compactions_lock:
+        rec = _core_compactions.get(session_id)
+        if rec is not None and time.time() - rec[0] > _CORE_COMPACTION_TTL_S:
+            _core_compactions.pop(session_id, None)
+            return None
+        return rec
+
+
+def _apply_core_size(session_id: str, size: int) -> int:
+    """Свежий размер из записи ядра вместо протухшей оценки.
+
+    ``last_prompt_tokens`` обновляется только на запросах, а ядерное сжатие
+    запроса не делает — без этого таймер видел бы старый большой размер.
+    """
+    rec = _core_record(session_id)
+    if rec is not None and rec[1] is not None:
+        return min(size, rec[1])
+    return size
+
 # Ожидающие таймеры переживают reload плагина: {session_id: {deadline, stamp, model}}
 _PENDING_FILE = "idle_compact_pending.json"
 
@@ -868,6 +931,12 @@ def _estimate_history(comp, session_id: str) -> int | None:
 def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
     with _timers_lock:
         _timers.pop(session_id, None)
+    # Guard: ядро сжало сессию после взвода таймера — пропускаем, не глядя
+    # на числа (наш гейт может быть ниже ядерного остатка).
+    rec = _core_record(session_id)
+    if rec is not None and rec[0] > stamp:
+        logger.info("idle-compact: session %s compacted by core, skip", session_id)
+        return
     # Чужой дедлайн (другого процесса) не трогаем: его разбудит владелец.
     try:
         with _pending_guard():
@@ -917,6 +986,8 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
                 return
             floor = gate
         size = exact if exact is not None else _rough_tokens(session_id)
+        # Guard: свежий размер из записи ядра вместо протухшей оценки.
+        size = _apply_core_size(session_id, size)
         idle_min = (time.time() - last_ts) / 60 if last_ts else -1
         if size <= floor:
             logger.info(
@@ -1983,6 +2054,7 @@ def register(ctx) -> None:
 
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("post_api_request", _on_post_api)
+    ctx.register_hook("post_compaction", _on_post_compaction)
     try:
         from . import savings
         ctx.register_hook("post_api_request", savings.on_post_api_request)

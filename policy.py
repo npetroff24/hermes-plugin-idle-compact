@@ -16,6 +16,7 @@ from .model_ttl import DEFAULT_TTL_SECONDS, TTL_BY_MODEL_SUBSTR, ttl_for_model
 
 __all__ = [
     "AGENT_CACHE_IDLE_TTL_DEFAULT_S",
+    "CORE_COMPACTION_TTL_S",
     "DEFAULT_TTL_SECONDS",
     "REQUEST_TIMEOUT_S",
     "TTL_BY_MODEL_SUBSTR",
@@ -43,6 +44,12 @@ AGENT_CACHE_IDLE_TTL_DEFAULT_S = 3600.0
 # Минимальный сторожевой запас при восстановлении/перепроверке дедлайнов:
 # дедлайн, просроченный сильнее, не воскрешаем — кеш всё равно мёртв.
 WATCHDOG_MIN_GRACE_S = 3600.0
+
+
+# Сколько секунд помним ядерное сжатие сессии (guard от двойного сжатия).
+# Таймеры живут до ~1 ч (deepseek: min(5100, выселение 3600) − 30 с),
+# запас четырёхкратный.
+CORE_COMPACTION_TTL_S = 4 * 3600.0
 
 
 def ttl_for(model: str) -> int:
