@@ -50,7 +50,7 @@ function isUnknownMethod(e) {
 async function fetchStatus() {
   const params = {}
   // RPC-путь (_resident_desktop) ищет по агентскому ключу, а не по runtime id.
-  const sid = storedSessionId() || currentSessionId()
+  const sid = storedSessionId() || focusedSessionId() || currentSessionId()
   if (sid) {
     params.session_id = sid
   }
@@ -62,6 +62,15 @@ async function fetchStatus() {
     chip: typeof res.chip === 'string' ? res.chip : 'idle-compact',
     panel: typeof res.panel === 'string' ? res.panel : '',
     bar: res.bar && typeof res.bar === 'object' ? res.bar : null
+  }
+}
+
+function focusedSessionId() {
+  try {
+    const f = host.state && host.state.focusedSessionId
+    return (f && typeof f.get === 'function' ? f.get() : null) || null
+  } catch (e) {
+    return null
   }
 }
 
@@ -83,6 +92,10 @@ function matchSession(p) {
     const a = host.state && host.state.activeSessionId
     if (a && typeof a.get === 'function' && a.get()) {
       ids.push(a.get())
+    }
+    const f = host.state && host.state.focusedSessionId
+    if (f && typeof f.get === 'function' && f.get()) {
+      ids.push(f.get())
     }
     const s = host.state && host.state.focusedStoredSessionId
     if (s && typeof s.get === 'function' && s.get()) {
@@ -238,15 +251,15 @@ export default {
 
     // One best-effort pull for the gateway route; the push covers the rest.
     // A slow or failing backend must never block chip registration.
-    // Switching chats resets the chip: stale numbers of another session
-    // must not pose as current. A single pull tries the gateway route at
-    // once; the push fills it on the next turn.
+    const currentSid = () => storedSessionId() || focusedSessionId() || currentSessionId()
     const pullOnce = () => {
       try {
+        // Ответ, прилетевший после нового переключения, выбрасываем.
+        const want = currentSid()
         const out = fetchStatus()
         if (out && typeof out.then === 'function') {
           out.then(
-            (fresh) => data.set(fresh),
+            (fresh) => { if (currentSid() === want) { data.set(fresh) } },
             (e) => { if (isUnknownMethod(e)) { rpcUnsupported = true } }
           )
         }
@@ -255,14 +268,28 @@ export default {
       }
     }
     pullOnce()
+    // Switching chats resets the chip: stale numbers of another session
+    // must not pose as current. A single pull tries the gateway route at
+    // once; the push fills it on the next turn. Переключение чата меняет
+    // focused-атомы, а не activeSessionId — слушаем все три.
+    const onSessionChange = () => {
+      rpcUnsupported = false
+      lastPushTs = 0
+      data.set({ chip: 'idle-compact', panel: '', bar: null })
+      pullOnce()
+    }
     try {
-      const a = host.state && host.state.activeSessionId
-      if (a && typeof a.listen === 'function') {
-        ctx.onDispose(a.listen(() => {
-          rpcUnsupported = false
-          data.set({ chip: 'idle-compact', panel: '', bar: null })
-          pullOnce()
-        }))
+      const st = host.state || {}
+      const atoms = [st.activeSessionId, st.focusedSessionId, st.focusedStoredSessionId]
+      let wired = 0
+      for (const a of atoms) {
+        if (a && typeof a.listen === 'function') {
+          ctx.onDispose(a.listen(onSessionChange))
+          wired++
+        }
+      }
+      if (wired === 0) {
+        throw new Error('no session atoms')
       }
     } catch (e) {
       // No session tracking — the push still fills the chip.
