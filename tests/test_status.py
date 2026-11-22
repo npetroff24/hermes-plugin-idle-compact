@@ -250,7 +250,7 @@ class TestRpcStatus(StatusBase):
             + "\n", encoding="utf-8")
         res = mod._rpc_status({"session_id": "s1"})
         self.assertEqual(res["chip"], "~290K left")
-        self.assertTrue(res["panel"].startswith("idle-compact "))
+        self.assertIn("Below gate", res["panel"])
         self.assertIn("saved: +$0.06", res["panel"])
 
     def test_rpc_ready_over_gate(self):
@@ -311,7 +311,9 @@ class TestRpcStatus(StatusBase):
         self.assertNotIn("broadcast", seen)
         payload = seen.get("payload") or {}
         self.assertEqual(payload.get("chip"), "~290K left")
-        self.assertIn("current context: ~10K (provider usage)", payload.get("panel", ""))
+        self.assertIn("Below gate", payload.get("panel", ""))
+        self.assertEqual(payload.get("bar"),
+                         {"used": 10000, "idle_gate": 300000, "threshold": 500000})
         self.assertEqual(payload.get("session_id"), "s1")
         self.assertEqual(payload.get("session_key"), "s1")
         self.assertEqual(payload.get("agent_session_id"), "s1")
@@ -384,7 +386,7 @@ class TestRpcStatus(StatusBase):
         mod, _home = self._mod_with_home()
         res = mod._rpc_status({})
         self.assertEqual(res["chip"], "idle-compact")
-        self.assertIn("compactions counted: 0", res["panel"])
+        self.assertEqual(res["panel"], "No measurements yet")
 
     def test_register_exposes_rpc(self):
         mod, _home = self._mod_with_home()

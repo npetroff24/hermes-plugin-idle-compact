@@ -116,13 +116,17 @@ class TestExactCoreCount(UsageLiveBase):
         mod, home = self._with_home_and_cache()
         self._with_breakdown(mod, 181500)
         res = mod._rpc_status({"session_id": "s-e"})
-        self.assertIn("current context: ~182K (core count)", res["panel"])
+        self.assertEqual(res["chip"], f"{mod._fmt_k(300000 - 181500)} left")
+        self.assertEqual(res["bar"]["used"], 181500)
+        self.assertIn("Below gate", res["panel"])
 
     def test_rpc_falls_back_without_agent(self):
         mod, home = self._with_home_and_cache()
         mod._resident = lambda sid: None  # type: ignore[attr-defined]
         res = mod._rpc_status({"session_id": "s-e"})
-        self.assertIn("current context: ~10K (provider usage)", res["panel"])
+        self.assertEqual(res["chip"], "~290K left")
+        self.assertIn("Below gate", res["panel"])
+        self.assertEqual(res["bar"]["used"], 10000)
 
     def test_push_stays_cheap(self):
         mod, home = self._with_home_and_cache()
@@ -152,6 +156,17 @@ class TestExactCoreCount(UsageLiveBase):
         mod, home = self._mod_with_home()
         (home / "config.yaml").write_text(
             "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n", encoding="utf-8")
+        import sqlite3
+
+        con = sqlite3.connect(str(home / "state.db"))
+        con.execute(
+            "CREATE TABLE sessions (id TEXT, source TEXT, model TEXT, session_key TEXT,"
+            " message_count INT, api_call_count INT, archived INT, ended_at INT,"
+            " last_activity_at INT)"
+        )
+        con.execute("INSERT INTO sessions (id, model) VALUES (?, ?)", ("s-e", "m"))
+        con.commit()
+        con.close()
         (home / "idle_compact_windows.json").write_text(
             json.dumps({"m": 1000000}), encoding="utf-8")
         (home / "idle_compact_usage.json").write_text(
@@ -162,3 +177,74 @@ class TestExactCoreCount(UsageLiveBase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestToastAndBar(UsageLiveBase):
+    def _db_with_session(self, home, session_id="s-t", model="m"):
+        import sqlite3
+
+        con = sqlite3.connect(str(home / "state.db"))
+        con.execute(
+            "CREATE TABLE sessions (id TEXT, source TEXT, model TEXT, session_key TEXT,"
+            " message_count INT, api_call_count INT, archived INT, ended_at INT,"
+            " last_activity_at INT)"
+        )
+        con.execute("INSERT INTO sessions (id, model) VALUES (?, ?)", (session_id, model))
+        con.commit()
+        con.close()
+
+    def _home_full(self, tokens=10000):
+        mod, home = self._mod_with_home()
+        (home / "config.yaml").write_text(
+            "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n", encoding="utf-8")
+        self._db_with_session(home)
+        (home / "idle_compact_windows.json").write_text(
+            json.dumps({"m": 1000000}), encoding="utf-8")
+        (home / "idle_compact_usage.json").write_text(
+            json.dumps({"s-t": {"tokens": tokens, "ts": time.time()}}),
+            encoding="utf-8")
+        return mod, home
+
+    def test_threshold_from_fraction(self):
+        mod, _ = self._home_full()
+        cfg = {"compression": {"threshold": 0.5}}
+        self.assertEqual(mod._live_threshold(1000000, cfg), 500000)
+
+    def test_threshold_default_core(self):
+        mod, _ = self._home_full()
+        self.assertEqual(mod._live_threshold(1000000, {}), 500000)
+        self.assertEqual(mod._live_threshold(200000, {}), 150000)
+
+    def test_toast_below_gate(self):
+        mod, _ = self._home_full(tokens=10000)
+        out = mod._toast_panel("s-t")
+        self.assertIn("Below gate", out)
+        self.assertNotIn("current context", out)
+
+    def test_toast_will_compact_with_timer(self):
+        mod, home = self._home_full(tokens=400000)
+        (home / "idle_compact_pending.json").write_text(
+            json.dumps({"s-t": {"deadline": time.time() + 480}}), encoding="utf-8")
+        out = mod._toast_panel("s-t")
+        self.assertIn("Will compact after ~8m idle", out)
+
+    def test_toast_core_owns(self):
+        mod, _ = self._home_full(tokens=400000)
+        mod._on_post_compaction(session_id="s-t", after_tokens=1000)
+        out = mod._toast_panel("s-t")
+        self.assertIn("Core owns it", out)
+
+    def test_toast_no_data(self):
+        mod, _ = self._home_full()
+        out = mod._toast_panel("s-unknown")
+        self.assertIn("No measurements yet", out)
+
+    def test_bar_numbers(self):
+        mod, _ = self._home_full(tokens=245000)
+        bar = mod._bar_numbers("s-t")
+        self.assertEqual(bar, {"used": 245000, "idle_gate": 300000,
+                               "threshold": 500000})
+
+    def test_bar_none_without_usage(self):
+        mod, _ = self._home_full()
+        self.assertIsNone(mod._bar_numbers("s-unknown"))

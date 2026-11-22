@@ -60,7 +60,8 @@ async function fetchStatus() {
   }
   return {
     chip: typeof res.chip === 'string' ? res.chip : 'idle-compact',
-    panel: typeof res.panel === 'string' ? res.panel : ''
+    panel: typeof res.panel === 'string' ? res.panel : '',
+    bar: res.bar && typeof res.bar === 'object' ? res.bar : null
   }
 }
 
@@ -98,6 +99,41 @@ function matchSession(p) {
   } catch (e) {
     return true
   }
+}
+
+function Bar({ bar }) {
+  // Шкала 0 → порог ядра: сплошное до текущего, слабая зона до гейта
+  // простоя, прозрачное до конца. Цвета — от текущей темы.
+  const used = Number(bar.used) || 0
+  const gate = Number(bar.idle_gate) || 0
+  const max = Number(bar.threshold) || 0
+  if (!(max > 0) || used < 0) {
+    return null
+  }
+  const u = Math.min(1, used / max)
+  const g = Math.min(1, gate / max)
+  const mix = (pct) => `color-mix(in srgb, currentColor ${pct}%, transparent)`
+  return jsx('span', {
+    style: {
+      position: 'relative', display: 'inline-block', width: 64, height: 10,
+      borderRadius: 2, outline: `1px solid ${mix(35)}`, background: mix(8),
+      overflow: 'hidden', verticalAlign: 'middle', flex: 'none'
+    },
+    children: [
+      u > 0 ? jsx('span', {
+        key: 'f',
+        style: { position: 'absolute', left: 0, top: 0, bottom: 0, width: `${u * 100}%`, background: mix(80) }
+      }) : null,
+      g > u ? jsx('span', {
+        key: 'z',
+        style: { position: 'absolute', left: `${u * 100}%`, top: 0, bottom: 0, width: `${(g - u) * 100}%`, background: mix(30) }
+      }) : null,
+      (g > 0 && g < 1) ? jsx('span', {
+        key: 't',
+        style: { position: 'absolute', left: `calc(${g * 100}% - 1px)`, top: 0, bottom: 0, width: 1, background: 'currentColor' }
+      }) : null
+    ]
+  })
 }
 
 function Chip({ data }) {
@@ -154,7 +190,10 @@ function Chip({ data }) {
     children: jsx('button', {
       onClick,
       className: 'inline-flex h-full cursor-pointer items-center gap-1 bg-transparent px-1.5 text-[0.6875rem] text-(--ui-text-tertiary)',
-      children: snap.chip
+      children: [
+        snap.bar ? jsx(Bar, { key: 'b', bar: snap.bar }) : null,
+        jsx('span', { key: 't', children: snap.chip })
+      ]
     })
   })
 }
@@ -163,7 +202,7 @@ export default {
   id: 'idle-compact',
   name: 'idle-compact',
   register(ctx) {
-    const data = atom({ chip: 'idle-compact', panel: '' })
+    const data = atom({ chip: 'idle-compact', panel: '', bar: null })
 
     ctx.register({
       area: 'statusBar.right',
@@ -189,7 +228,8 @@ export default {
         lastPushTs = ts
         data.set({
           chip: p.chip,
-          panel: typeof p.panel === 'string' ? p.panel : ''
+          panel: typeof p.panel === 'string' ? p.panel : '',
+          bar: p.bar && typeof p.bar === 'object' ? p.bar : null
         })
       } catch (e) {
         // A bad frame must never break the chip.
@@ -220,7 +260,7 @@ export default {
       if (a && typeof a.listen === 'function') {
         ctx.onDispose(a.listen(() => {
           rpcUnsupported = false
-          data.set({ chip: 'idle-compact', panel: '' })
+          data.set({ chip: 'idle-compact', panel: '', bar: null })
           pullOnce()
         }))
       }

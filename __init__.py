@@ -198,18 +198,13 @@ GATE_TOKENS = int(THRESHOLD_TOKENS * TARGET_RATIO * GATE_K)  # = 150000
 _warned_no_config = False
 
 
-def _live_target(window_tokens: int | None = None, cfg: dict | None = None) -> int | None:
-    """Живая цель из config.yaml. Нет конфига — None (скип, не вшитое).
+def _live_threshold(window_tokens: int | None = None, cfg: dict | None = None) -> int | None:
+    """Порог сжатия ядра в токенах. Нет данных — None.
 
-    Понимает оба вида порога: ``threshold_tokens`` (абсолютные токены) и
-    ``threshold`` (доля окна 0..1). Долю умножаем только на ФАКТИЧЕСКОЕ окно
-    модели (``window_tokens`` из живого компрессора); выдумывать окно нельзя —
-    иначе для модели с окном 200К цель завышается впятеро.
-
-    Без секции в конфиге — дефолты ядра (порог 0.50, для окон <512К пол 0.75),
-    чтобы на чистой установке плагин работал, а не молчал.
+    Тот же источник, что у цели (доля × фактическое окно / абсолютные
+    токены / дефолт ядра), но без умножения на target_ratio: нужен шкале
+    чипа как правая граница.
     """
-    global _warned_no_config
     try:
         if cfg is None:
             cfg = _read_config()
@@ -229,11 +224,37 @@ def _live_target(window_tokens: int | None = None, cfg: dict | None = None) -> i
             # Дефолт ядра: 0.50 окна, пол 0.75 для окон <512К.
             frac = 0.75 if int(window_tokens) < 512 * 1024 else 0.50
             thr = int(frac * int(window_tokens))
+        if thr is None:
+            raise ValueError("no compression.threshold_tokens/threshold in config")
+        return int(thr)
+    except Exception:
+        return None
+
+
+def _live_target(window_tokens: int | None = None, cfg: dict | None = None) -> int | None:
+    """Живая цель из config.yaml. Нет конфига — None (скип, не вшитое).
+
+    Понимает оба вида порога: ``threshold_tokens`` (абсолютные токены) и
+    ``threshold`` (доля окна 0..1). Долю умножаем только на ФАКТИЧЕСКОЕ окно
+    модели (``window_tokens`` из живого компрессора); выдумывать окно нельзя —
+    иначе для модели с окном 200К цель завышается впятеро.
+
+    Без секции в конфиге — дефолты ядра (порог 0.50, для окон <512К пол 0.75),
+    чтобы на чистой установке плагин работал, а не молчал.
+    """
+    global _warned_no_config
+    try:
+        if cfg is None:
+            cfg = _read_config()
+        if cfg is None:
+            raise ValueError("config.yaml unreadable")
+        thr = _live_threshold(window_tokens, cfg)
+        if thr is None:
+            raise ValueError("no compression.threshold_tokens/threshold in config")
+        comp = cfg.get("compression") or {}
         ratio = comp.get("target_ratio")
         if ratio is None:
             ratio = TARGET_RATIO
-        if thr is None:
-            raise ValueError("no compression.threshold_tokens/threshold in config")
         return int(int(thr) * float(ratio))
     except Exception as exc:
         if not _warned_no_config:
@@ -1909,8 +1930,8 @@ def _rpc_status(params=None, session_id: str | None = None, _exact: bool = True,
             chip = "Ready" if size >= gate else f"{_fmt_k(gate - size)} left"
         else:
             chip = "idle-compact"
-        panel = _cmd_status("", session_id=sid, _exact_size=exact)
-        return {"chip": chip, "panel": panel}
+        panel = _toast_panel(sid, exact=exact)
+        return {"chip": chip, "panel": panel, "bar": _bar_numbers(sid, exact=exact)}
     except Exception as exc:
         return {"chip": "idle-compact", "panel": f"idle-compact: status failed ({exc})"}
 
@@ -1965,6 +1986,83 @@ def _fmt_ts(ts: float) -> str:
         return datetime.fromtimestamp(float(ts)).strftime("%d.%m %H:%M")
     except Exception:
         return "?"
+
+
+def _fmt_dur(seconds: float) -> str:
+    """Остаток таймера человеческим: ~8m / ~40s."""
+    try:
+        s = max(0, int(seconds))
+    except Exception:
+        return ""
+    if s >= 90:
+        return f"~{round(s / 60)}m"
+    return f"~{s}s"
+
+
+def _bar_numbers(session_id: str | None, exact: int | None = None) -> dict | None:
+    """Цифры шкалы чипа: {used, idle_gate, threshold}. Нет данных — None.
+
+    Шкала — от 0 до порога ядра (не до окна: окно показывает сам Hermes).
+    JS только рисует, не считает.
+    """
+    if not session_id:
+        return None
+    try:
+        size, gate = _panel_context(session_id, exact=exact)
+        if size is None or not gate:
+            return None
+        cfg = _read_config()
+        model = ""
+        try:
+            row = _session_row(session_id)
+            model = (row or {}).get("model") or ""
+        except Exception:
+            model = ""
+        window = _cached_window(model) if model else 0
+        thr = _live_threshold(window, cfg) if window > 0 else None
+        if not thr:
+            return None
+        return {"used": int(size), "idle_gate": int(gate), "threshold": int(thr)}
+    except Exception:
+        return None
+
+
+def _toast_panel(session_id: str | None, exact: int | None = None) -> str:
+    """Короткая панель тоста: состояние + деньги. Детали — в /idle-compact.
+
+    Контекст в цифрах не показываем: его показывает сам Hermes.
+    """
+    try:
+        state = "No measurements yet"
+        size, gate = _panel_context(session_id, exact=exact)
+        if _core_record(session_id or "") is not None:
+            state = "Core owns it — standing by"
+        elif size is not None and gate:
+            if size < gate:
+                state = "Below gate — won't touch"
+            else:
+                when = ""
+                try:
+                    entry = (_load_pending() or {}).get(session_id or "") or {}
+                    left = float(entry.get("deadline") or 0) - time.time()
+                    if left > 0:
+                        when = f" after {_fmt_dur(left)} idle"
+                except Exception:
+                    when = ""
+                state = f"Will compact{when} while idle" if when else "Will compact while idle"
+        stats = _ledger_stats()
+        money = ""
+        if stats is not None and stats["events"] > 0:
+            money = f"saved: {_fmt_money(stats['net'])}"
+            if stats["base"] > 0:
+                pct = int(round(100 * stats["net"] / stats["base"]))
+                money += f" — that's {pct}%"
+            money += f" · paid {stats['plus_n']} · wasted {stats['waste_n']}"
+            if stats["unmeasured_n"] > 0:
+                money += f" · {stats['unmeasured_n']} uncounted"
+        return state if not money else f"{state}\n{money}"
+    except Exception as exc:
+        return f"idle-compact: status failed ({exc})"
 
 
 def _panel_context(session_id: str | None, exact: int | None = None) -> tuple[int | None, int | None]:
