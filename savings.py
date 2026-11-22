@@ -365,6 +365,8 @@ def on_post_api_request(**kw) -> None:
         usage = kw.get("usage") or {}
         real_after = int(usage.get("input_tokens") or 0) + int(
             usage.get("cache_read_tokens") or usage.get("cache_read") or 0
+        ) + int(
+            usage.get("cache_write_tokens") or usage.get("cache_write") or 0
         )
         if real_after <= 0:
             real_after = int(usage.get("prompt_tokens") or usage.get("input") or 0)

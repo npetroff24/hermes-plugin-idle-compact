@@ -233,6 +233,18 @@ class TestLifecycle(unittest.TestCase):
         savings.on_post_api_request(session_id="nothing", started_at=0)
         self.assertEqual(savings.session_summary("nothing"), {})
 
+    def test_after_counts_cache_write_bucket(self):
+        sid = "sess-w"
+        savings.begin_compaction(sid, "muse-spark-1.3-contributor", 225_000)
+        savings.end_compaction(sid, after_tokens=100_000)
+        pend = savings._state[sid]["pending"]
+        savings.on_post_api_request(
+            session_id=sid, started_at=pend["ts"] + 3600,
+            usage={"input_tokens": 1000, "cache_read_tokens": 2000,
+                   "cache_write_tokens": 4000})
+        lines = [json.loads(x) for x in self.ledger.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(lines[-1]["after"], 7000)
+
     def test_abort_clears_window(self):
         savings.begin_compaction("sess-2", "muse-spark", 200_000)
         savings.abort_compaction("sess-2")

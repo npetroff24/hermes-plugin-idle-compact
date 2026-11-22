@@ -610,12 +610,20 @@ def _usage_path():
     return _home() / "idle_compact_usage.json"
 
 
+# Последний замер по сессии в этом процессе: троттлинг записи файла.
+_usage_last_write: dict[str, tuple[float, int]] = {}
+
+
 def _note_usage(session_id: str, tokens: int) -> None:
     """Запомнить реальный размер промпта сессии (usage API, не оценка).
 
     Оценка по символам занижает в 2–3 раза и врёт даже сторону порога
     (129K против реальных 366K) — панели/чипу отдаём только замер.
     Записи старше 7 суток подчищаем тут же.
+
+    Вызывается на каждый ответ модели (десятки за ход с инструментами),
+    файл делят два процесса (gateway + serve) — поэтому троттлинг
+    (не чаще ~10 с и при изменении от 1%) и атомарная запись.
     """
     try:
         tokens = int(tokens or 0)
@@ -625,32 +633,43 @@ def _note_usage(session_id: str, tokens: int) -> None:
         import json
         import time as _time
 
+        now = _time.time()
+        prev = _usage_last_write.get(session_id)
+        if prev is not None:
+            pts, ptok = prev
+            if now - pts < 10.0 and abs(tokens - ptok) <= max(1, ptok // 100):
+                return
         path = _usage_path()
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             data = data if isinstance(data, dict) else {}
         except Exception:
             data = {}
-        now = _time.time()
         data = {k: v for k, v in data.items()
                 if now - float((v or {}).get("ts") or 0) < 7 * 86400}
         if (data.get(session_id) or {}).get("tokens") == tokens:
+            _usage_last_write[session_id] = (now, tokens)
             return
         data[session_id] = {"tokens": tokens, "ts": now}
-        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+        _usage_last_write[session_id] = (now, tokens)
     except Exception:
         logger.debug("idle-compact: usage cache write failed", exc_info=True)
 
 
 def _cached_usage(session_id: str) -> int:
     """Реальный размер сессии из кеша. Не видели — 0. Только чтение."""
-    try:
-        import json
+    import json
 
-        data = json.loads(_usage_path().read_text(encoding="utf-8"))
-        return int(((data or {}).get(str(session_id or "")) or {}).get("tokens") or 0)
-    except Exception:
-        return 0
+    for _ in range(2):  # второй шанс при чтении в момент чужой записи
+        try:
+            data = json.loads(_usage_path().read_text(encoding="utf-8"))
+            return int(((data or {}).get(str(session_id or "")) or {}).get("tokens") or 0)
+        except Exception:
+            continue
+    return 0
 
 
 def _pid_alive(pid: int) -> bool:
@@ -1031,10 +1050,11 @@ def _push_status(session_id: str) -> None:
     except Exception:
         return
     try:
-        res = _rpc_status({"session_id": session_id})
+        res = _rpc_status({"session_id": session_id}, _exact=False)
         if not isinstance(res, dict):
             return
         res = dict(res)
+        res["ts"] = time.time()
         # Оба пространства id: runtime (activeSessionId в десктопе) и
         # агентский ключ. JS принимает событие при совпадении любого.
         res["session_id"] = _ui_session_id(session_id) or session_id
@@ -1053,6 +1073,26 @@ def _push_status(session_id: str) -> None:
         logger.debug("idle-compact: status push failed", exc_info=True)
 
 
+def _payload_prompt_tokens(kw: dict) -> int:
+    """Свежий размер промпта из события post_api_request.
+
+    Хук стреляет раньше, чем ядро записывает usage ответа, — читать
+    ``comp.last_prompt_tokens`` здесь значит брать предыдущий запрос.
+    В событии уже лежит usage текущего: готовое ``prompt_tokens``,
+    иначе канон ядра (вход + чтение + запись кеша).
+    """
+    try:
+        usage = kw.get("usage") or {}
+        direct = int(usage.get("prompt_tokens") or 0)
+        if direct > 0:
+            return direct
+        return (int(usage.get("input_tokens") or usage.get("input") or 0)
+                + int(usage.get("cache_read_tokens") or usage.get("cache_read") or 0)
+                + int(usage.get("cache_write_tokens") or usage.get("cache_write") or 0))
+    except Exception:
+        return 0
+
+
 def _on_post_api(session_id: str = "", **kwargs) -> None:
     """Ставим/сдвигаем таймер после каждого ответа модели.
 
@@ -1067,6 +1107,10 @@ def _on_post_api(session_id: str = "", **kwargs) -> None:
     if session_id not in _post_api_seen:
         _post_api_seen.add(session_id)
         logger.info("idle-compact: post_api hook reached %s", session_id)
+    try:
+        _note_usage(session_id, _payload_prompt_tokens(kwargs))
+    except Exception:
+        logger.debug("idle-compact: usage note failed", exc_info=True)
     try:
         _arm_engine(session_id)
     except Exception:
@@ -1123,7 +1167,8 @@ def _arm_engine(session_id: str) -> None:
         )
         return
     _note_window(cap.get("model") or getattr(agent, "model", ""), getattr(comp, "context_length", 0))
-    _note_usage(session_id, getattr(comp, "last_prompt_tokens", 0))
+    # Замер usage — из события post_api (см. _on_post_api): читать
+    # comp.last_prompt_tokens здесь нельзя, хук стреляет раньше записи usage.
     route = {
         "api_mode": cap.get("api_mode") or getattr(agent, "api_mode", ""),
         "base_url": cap.get("base_url") or getattr(agent, "base_url", ""),
@@ -1826,27 +1871,51 @@ def _fmt_money(amount: float) -> str:
         return "?"
 
 
-def _rpc_status(params=None, session_id: str | None = None, **kwargs):
+def _breakdown_size(session_id: str | None) -> int | None:
+    """Точное число ядра (то же, что рисует его панель) или None.
+
+    Только для клика: на большой истории вызов дорогой (~0.5 с),
+    на каждый ход так нельзя — пуш идёт дешёвым usage.
+    """
+    if not session_id:
+        return None
+    try:
+        found = _resident(session_id)
+        if not found:
+            return None
+        from agent.context_breakdown import compute_session_context_breakdown
+
+        bd = compute_session_context_breakdown(found[0])
+        n = int((bd or {}).get("context_used") or 0)
+        return n if n > 0 else None
+    except Exception:
+        return None
+
+
+def _rpc_status(params=None, session_id: str | None = None, _exact: bool = True, **kwargs):
     """RPC ``plugin.idle-compact.status`` для десктопной половины.
 
     Возвращает JSON: короткая строка чипа + полная панель тоста.
     Сессия — из params (активная вкладка) или из контекста вызова.
+    ``_exact`` — точное число ядра вместо usage (клик/переключение чата);
+    внутренний пуш зовёт с ``_exact=False`` (дешево, на каждый ход).
     """
     try:
         params = params or {}
         sid = params.get("session_id") or session_id
-        size, gate = _panel_context(sid)
+        exact = _breakdown_size(sid) if _exact else None
+        size, gate = _panel_context(sid, exact=exact)
         if size is not None and gate:
             chip = "Ready" if size >= gate else f"{_fmt_k(gate - size)} left"
         else:
             chip = "idle-compact"
-        panel = _cmd_status("", session_id=sid)
+        panel = _cmd_status("", session_id=sid, _exact_size=exact)
         return {"chip": chip, "panel": panel}
     except Exception as exc:
         return {"chip": "idle-compact", "panel": f"idle-compact: status failed ({exc})"}
 
 
-def _cmd_status(raw_args: str = "", session_id: str | None = None) -> str:
+def _cmd_status(raw_args: str = "", session_id: str | None = None, _exact_size: int | None = None) -> str:
     """Хендлер ``/idle-compact``: панель статуса. Строго read-only.
 
     Порядок — от полезного к служебному: деньги → разбивка → контекст
@@ -1871,9 +1940,10 @@ def _cmd_status(raw_args: str = "", session_id: str | None = None) -> str:
         lines.append(brk)
         if stats["last_ts"] > 0:
             lines.append(f"last compaction: {_fmt_ts(stats['last_ts'])}")
-    size, gate = _panel_context(session_id)
+    size, gate = _panel_context(session_id, exact=_exact_size)
     if size is not None:
-        ctx = f"current context: {_fmt_k(size)}"
+        src = "core count" if _exact_size else "provider usage"
+        ctx = f"current context: {_fmt_k(size)} ({src})"
         if gate:
             if size >= gate:
                 ctx += f" · over the limit ({_fmt_k(gate)})"
@@ -1897,16 +1967,16 @@ def _fmt_ts(ts: float) -> str:
         return "?"
 
 
-def _panel_context(session_id: str | None) -> tuple[int | None, int | None]:
+def _panel_context(session_id: str | None, exact: int | None = None) -> tuple[int | None, int | None]:
     """(текущий размер, порог в токенах) для панели. Нет данных — None.
 
     Размер — только замер usage API из кеша. Оценка по символам занижает
     в 2–3 раза и врёт сторону порога, поэтому фолбэка на неё нет: нет
-    замера — нет строки.
+    замера — нет строки. ``exact`` — точное число ядра (клик по чипу).
     """
     if not session_id:
         return None, None
-    size = _cached_usage(session_id)
+    size = exact if exact else _cached_usage(session_id)
     if size <= 0:
         return None, None
     gate = None

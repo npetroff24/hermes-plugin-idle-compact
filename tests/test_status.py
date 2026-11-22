@@ -156,7 +156,7 @@ class TestPanelContext(StatusBase):
     def test_remaining_line(self):
         mod, _home = self._home_with_all()
         out = mod._cmd_status("", session_id="s1")
-        self.assertIn("current context: ~10K · ~290K left before compaction (limit ~300K)", out)
+        self.assertIn("current context: ~10K (provider usage) · ~290K left before compaction (limit ~300K)", out)
 
     def test_over_gate_line(self):
         mod, _home = self._home_with_all(tokens=300001)
@@ -167,7 +167,7 @@ class TestPanelContext(StatusBase):
         mod, home = self._home_with_all()
         (home / "idle_compact_windows.json").unlink()
         out = mod._cmd_status("", session_id="s1")
-        self.assertIn("current context: ~10K", out)
+        self.assertIn("current context: ~10K (provider usage)", out)
         self.assertNotIn("limit", out)
 
     def test_no_session_no_context_line(self):
@@ -311,7 +311,7 @@ class TestRpcStatus(StatusBase):
         self.assertNotIn("broadcast", seen)
         payload = seen.get("payload") or {}
         self.assertEqual(payload.get("chip"), "~290K left")
-        self.assertIn("current context: ~10K", payload.get("panel", ""))
+        self.assertIn("current context: ~10K (provider usage)", payload.get("panel", ""))
         self.assertEqual(payload.get("session_id"), "s1")
         self.assertEqual(payload.get("session_key"), "s1")
         self.assertEqual(payload.get("agent_session_id"), "s1")

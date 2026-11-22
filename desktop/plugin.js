@@ -25,6 +25,7 @@ const TOAST_ID = 'idle-compact-status'
 let toastShown = false
 let toastAt = 0
 let rpcUnsupported = false
+let lastPushTs = 0
 
 function currentSessionId() {
   try {
@@ -87,7 +88,9 @@ function matchSession(p) {
       ids.push(s.get())
     }
     if (ids.length === 0) {
-      return true
+      // Окно без активной сессии: чужой пуш не принимаем, иначе цифры
+      // другой сессии выдадут себя за текущие.
+      return false
     }
     return [p.session_id, p.session_key, p.agent_session_id].some(
       (v) => typeof v === 'string' && v && ids.indexOf(v) >= 0
@@ -110,49 +113,40 @@ function Chip({ data }) {
       }
       return
     }
-    if (snap.panel) {
+    const showPanel = (text) => {
       toastShown = true
       toastAt = Date.now()
       host.notify({
         durationMs: TOAST_MS,
         id: TOAST_ID,
         kind: 'info',
-        message: snap.panel,
+        message: text,
         onDismiss: () => { toastShown = false },
         title: 'idle-compact'
       })
-      return
     }
-    if (rpcUnsupported) {
-      toastShown = true
-      toastAt = Date.now()
-      host.notify({ durationMs: TOAST_MS, id: TOAST_ID, kind: 'info', message: 'idle-compact status lives in chat — run /idle-compact', onDismiss: () => { toastShown = false }, title: 'idle-compact' })
-      return
-    }
-    try {
-      const fresh = await fetchStatus()
-      data.set(fresh)
-      toastShown = true
-      toastAt = Date.now()
-      host.notify({
-        durationMs: TOAST_MS,
-        id: TOAST_ID,
-        kind: 'info',
-        message: fresh.panel,
-        onDismiss: () => { toastShown = false },
-        title: 'idle-compact'
-      })
-    } catch (e) {
-      if (isUnknownMethod(e)) {
-        rpcUnsupported = true
-        toastShown = true
-        toastAt = Date.now()
-        host.notify({ durationMs: TOAST_MS, id: TOAST_ID, kind: 'info', message: 'idle-compact status lives in chat — run /idle-compact', onDismiss: () => { toastShown = false }, title: 'idle-compact' })
+    // Клик всегда тянет свежее через RPC (там точное число ядра);
+    // пуш — запасной путь для serve, где RPC отвечает -32601.
+    if (!rpcUnsupported) {
+      try {
+        const fresh = await fetchStatus()
+        data.set(fresh)
+        showPanel(fresh.panel)
         return
+      } catch (e) {
+        if (!isUnknownMethod(e)) {
+          const detail = (e && (e.message || e.data || e.code)) || e
+          host.notify({ durationMs: TOAST_MS, kind: 'error', message: `idle-compact: ${String(detail)}`, title: 'idle-compact' })
+          return
+        }
+        rpcUnsupported = true
       }
-      const detail = (e && (e.message || e.data || e.code)) || e
-      host.notify({ durationMs: TOAST_MS, kind: 'error', message: `idle-compact: ${String(detail)}`, title: 'idle-compact' })
     }
+    if (snap.panel) {
+      showPanel(snap.panel)
+      return
+    }
+    showPanel('idle-compact status lives in chat — run /idle-compact')
   }
 
   return jsx(Tip, {
@@ -187,6 +181,12 @@ export default {
         if (!matchSession(p)) {
           return
         }
+        // Старый пуш поверх свежего не кладем (переупорядочивание событий).
+        const ts = Number(p.ts) || 0
+        if (ts < lastPushTs) {
+          return
+        }
+        lastPushTs = ts
         data.set({
           chip: p.chip,
           panel: typeof p.panel === 'string' ? p.panel : ''
