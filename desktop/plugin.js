@@ -149,6 +149,18 @@ function Bar({ bar }) {
   })
 }
 
+function fmtT(n) {
+  // Коротко, как Python _fmt_k: 42245 → «~42K», 850 → «~850».
+  const v = Number(n)
+  if (!Number.isFinite(v) || v < 0) {
+    return '?'
+  }
+  if (v < 1000) {
+    return `~${Math.round(v)}`
+  }
+  return `~${Math.round(v / 1000)}K`
+}
+
 function Chip({ data }) {
   const snap = useValue(data)
 
@@ -198,14 +210,18 @@ function Chip({ data }) {
     showPanel('idle-compact status lives in chat — run /idle-compact')
   }
 
+  const tip = snap.bar
+    ? `Used ${fmtT(snap.bar.used)} · idle gate ${fmtT(snap.bar.idle_gate)} · threshold ${fmtT(snap.bar.threshold)} — click for details`
+    : 'idle-compact status — click for details'
   return jsx(Tip, {
-    label: 'idle-compact status — click for details',
+    label: tip,
     children: jsx('button', {
       onClick,
       className: 'inline-flex h-full cursor-pointer items-center gap-1 bg-transparent px-1.5 text-[0.6875rem] text-(--ui-text-tertiary)',
       children: [
+        jsx('span', { key: 't', children: snap.chip }),
         snap.bar ? jsx(Bar, { key: 'b', bar: snap.bar }) : null,
-        jsx('span', { key: 't', children: snap.chip })
+        snap.bar ? jsx('span', { key: 'm', children: fmtT(snap.bar.threshold) }) : null
       ]
     })
   })
