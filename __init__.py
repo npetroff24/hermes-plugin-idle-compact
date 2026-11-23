@@ -1916,7 +1916,10 @@ def _breakdown_size(session_id: str | None) -> int | None:
 def _rpc_status(params=None, session_id: str | None = None, _exact: bool = True, **kwargs):
     """RPC ``plugin.idle-compact.status`` для десктопной половины.
 
-    Возвращает JSON: короткая строка чипа + полная панель тоста.
+    Возвращает JSON. Цифры — ``savings``, ``chat`` и ``bar``: панель только
+    рисует, все проценты и пороги считает Python. ``chip`` и ``panel``
+    остаются коротким текстом для половины, которая ещё живёт в
+    неперезапущенном приложении.
     Сессия — из params (активная вкладка) или из контекста вызова.
     ``_exact`` — точное число ядра вместо usage (клик/переключение чата);
     внутренний пуш зовёт с ``_exact=False`` (дешево, на каждый ход).
@@ -1926,14 +1929,24 @@ def _rpc_status(params=None, session_id: str | None = None, _exact: bool = True,
         sid = params.get("session_id") or session_id
         exact = _breakdown_size(sid) if _exact else None
         size, gate = _panel_context(sid, exact=exact)
+        stats = _ledger_stats()
+        chat = _chat_state(sid, size, gate)
         if size is not None and gate:
             chip = "Ready" if size >= gate else f"{_fmt_k(gate - size)} left"
         else:
             chip = "idle-compact"
-        panel = _toast_panel(sid, exact=exact)
-        return {"chip": chip, "panel": panel, "bar": _bar_numbers(sid, exact=exact)}
+        return {
+            "chip": chip,
+            "panel": _toast_panel(sid, size=size, gate=gate, stats=stats, chat=chat),
+            "bar": _bar_numbers(sid, size=size, gate=gate),
+            "savings": _savings_numbers(stats),
+            "chat": chat,
+            "version": _STATUS_VERSION,
+        }
     except Exception as exc:
-        return {"chip": "idle-compact", "panel": f"idle-compact: status failed ({exc})"}
+        return {"chip": "idle-compact",
+                "panel": f"idle-compact: status failed ({exc})",
+                "version": _STATUS_VERSION}
 
 
 def _cmd_status(raw_args: str = "", session_id: str | None = None, _exact_size: int | None = None) -> str:
@@ -1947,20 +1960,20 @@ def _cmd_status(raw_args: str = "", session_id: str | None = None, _exact_size: 
         return _cmd_debug(session_id=session_id)
     lines = [f"idle-compact {_STATUS_VERSION}"]
     stats = _ledger_stats()
-    if stats is None or stats["events"] <= 0:
+    saved = _savings_numbers(stats)
+    if saved is None:
         lines.append("compactions counted: 0")
     else:
-        money = f"saved: {_fmt_money(stats['net'])}"
-        if stats["base"] > 0:
-            pct = int(round(100 * stats["net"] / stats["base"]))
-            money += f" — that's {pct}% of costs without the plugin"
+        money = f"saved: {_fmt_money(saved['net'])}"
+        if saved["pct"] is not None:
+            money += f" — that's {saved['pct']}% of costs without the plugin"
         lines.append(money)
-        brk = f"paid off {stats['plus_n']} · wasted {stats['waste_n']}"
-        if stats["unmeasured_n"] > 0:
-            brk += f" · {stats['unmeasured_n']} more not counted (cost not saved)"
+        brk = f"paid off {saved['paid']} · wasted {saved['wasted']}"
+        if saved["uncounted"] > 0:
+            brk += f" · {saved['uncounted']} more not counted (cost not saved)"
         lines.append(brk)
-        if stats["last_ts"] > 0:
-            lines.append(f"last compaction: {_fmt_ts(stats['last_ts'])}")
+        if saved["last_ts"] > 0:
+            lines.append(f"last compaction: {_fmt_ts(saved['last_ts'])}")
     size, gate = _panel_context(session_id, exact=_exact_size)
     if size is not None:
         src = "core count" if _exact_size else "provider usage"
@@ -1999,16 +2012,19 @@ def _fmt_dur(seconds: float) -> str:
     return f"~{s}s"
 
 
-def _bar_numbers(session_id: str | None, exact: int | None = None) -> dict | None:
+def _bar_numbers(session_id: str | None, exact: int | None = None,
+                 size: int | None = None, gate: int | None = None) -> dict | None:
     """Цифры шкалы чипа: {used, idle_gate, threshold}. Нет данных — None.
 
     Шкала — от 0 до порога ядра (не до окна: окно показывает сам Hermes).
-    JS только рисует, не считает.
+    JS только рисует, не считает. ``size``/``gate`` — уже посчитанные
+    вызывающим: один статус считает их один раз на всю отдачу.
     """
     if not session_id:
         return None
     try:
-        size, gate = _panel_context(session_id, exact=exact)
+        if size is None or gate is None:
+            size, gate = _panel_context(session_id, exact=exact)
         if size is None or not gate:
             return None
         cfg = _read_config()
@@ -2027,39 +2043,84 @@ def _bar_numbers(session_id: str | None, exact: int | None = None) -> dict | Non
         return None
 
 
-def _toast_panel(session_id: str | None, exact: int | None = None) -> str:
+def _savings_numbers(stats: dict | None) -> dict | None:
+    """Деньги сэкономленного цифрами, для чипа и панели. Нет событий — None.
+
+    ``pct`` — доля сэкономленного от того, что эти сжатия стоили бы без
+    плагина; None, когда базлайна нет (считать процент не из чего).
+    Формула здесь одна: и ``/idle-compact``, и панель берут её отсюда.
+    """
+    if not stats or stats.get("events", 0) <= 0:
+        return None
+    pct = None
+    try:
+        if stats["base"] > 0:
+            pct = int(round(100 * stats["net"] / stats["base"]))
+    except Exception:
+        pct = None
+    try:
+        return {
+            "pct": pct,
+            "net": round(float(stats["net"]), 5),
+            "base": round(float(stats["base"]), 5),
+            "paid": int(stats["plus_n"]),
+            "wasted": int(stats["waste_n"]),
+            "uncounted": int(stats["unmeasured_n"]),
+            "events": int(stats["events"]),
+            "last_ts": float(stats["last_ts"]),
+        }
+    except Exception:
+        return None
+
+
+def _chat_state(session_id: str | None, size: int | None, gate: int | None) -> dict:
+    """Состояние этой сессии для панели: ``key`` для тона, ``label``, ``eta_s``.
+
+    Подпись — одна короткая строка без служебных слов: панель ставит её
+    значением строки «This chat».
+    """
+    if _core_record(session_id or "") is not None:
+        return {"key": "core", "label": "Core owns it — standing by", "eta_s": 0}
+    if size is None or not gate:
+        return {"key": "unknown", "label": "No measurements yet", "eta_s": 0}
+    if size < gate:
+        return {"key": "below_gate", "label": "Below gate — won't touch", "eta_s": 0}
+    left = 0
+    try:
+        entry = (_load_pending() or {}).get(session_id or "") or {}
+        left = int(float(entry.get("deadline") or 0) - time.time())
+    except Exception:
+        left = 0
+    if left > 0:
+        return {"key": "ready", "label": f"Will compact after {_fmt_dur(left)} idle",
+                "eta_s": left}
+    return {"key": "ready", "label": "Will compact while idle", "eta_s": 0}
+
+
+def _toast_panel(session_id: str | None, exact: int | None = None,
+                 size: int | None = None, gate: int | None = None,
+                 stats: dict | None = None, chat: dict | None = None) -> str:
     """Короткая панель тоста: состояние + деньги. Детали — в /idle-compact.
 
     Контекст в цифрах не показываем: его показывает сам Hermes.
+    ``size``/``gate``/``stats``/``chat`` — уже посчитанные вызывающим, чтобы
+    один статус не читал конфиг, базу и леджер по два раза.
     """
     try:
-        state = "No measurements yet"
-        size, gate = _panel_context(session_id, exact=exact)
-        if _core_record(session_id or "") is not None:
-            state = "Core owns it — standing by"
-        elif size is not None and gate:
-            if size < gate:
-                state = "Below gate — won't touch"
-            else:
-                when = ""
-                try:
-                    entry = (_load_pending() or {}).get(session_id or "") or {}
-                    left = float(entry.get("deadline") or 0) - time.time()
-                    if left > 0:
-                        when = f" after {_fmt_dur(left)} idle"
-                except Exception:
-                    when = ""
-                state = f"Will compact{when} while idle" if when else "Will compact while idle"
-        stats = _ledger_stats()
+        if chat is None:
+            if size is None or gate is None:
+                size, gate = _panel_context(session_id, exact=exact)
+            chat = _chat_state(session_id, size, gate)
+        state = str((chat or {}).get("label") or "No measurements yet")
+        saved = _savings_numbers(stats if stats is not None else _ledger_stats())
         money = ""
-        if stats is not None and stats["events"] > 0:
-            money = f"saved: {_fmt_money(stats['net'])}"
-            if stats["base"] > 0:
-                pct = int(round(100 * stats["net"] / stats["base"]))
-                money += f" — that's {pct}%"
-            money += f" · paid {stats['plus_n']} · wasted {stats['waste_n']}"
-            if stats["unmeasured_n"] > 0:
-                money += f" · {stats['unmeasured_n']} uncounted"
+        if saved is not None:
+            money = f"saved: {_fmt_money(saved['net'])}"
+            if saved["pct"] is not None:
+                money += f" — that's {saved['pct']}%"
+            money += f" · paid {saved['paid']} · wasted {saved['wasted']}"
+            if saved["uncounted"] > 0:
+                money += f" · {saved['uncounted']} uncounted"
         return state if not money else f"{state}\n{money}"
     except Exception as exc:
         return f"idle-compact: status failed ({exc})"
