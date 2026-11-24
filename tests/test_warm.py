@@ -10,7 +10,7 @@ from pathlib import Path
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_DIR))
 
-from _bootstrap import AGENT_HOME  # noqa: E402,F401  (кладёт исходники ядра в sys.path)
+from _bootstrap import AGENT_HOME, load_plugin_module  # noqa: E402,F401  (кладёт исходники ядра в sys.path)
 
 _spec = importlib.util.spec_from_file_location("wc_under_test", PLUGIN_DIR / "warm_client.py")
 assert _spec is not None and _spec.loader is not None
@@ -255,10 +255,7 @@ class TestTruncationGuard(unittest.TestCase):
 
 class TestExtraContext(unittest.TestCase):
     def _we(self):
-        spec = importlib.util.spec_from_file_location("we_extra", PLUGIN_DIR / "warm_engine.py")
-        we = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(we)
-        return we
+        return load_plugin_module("warm_engine.py", "we_extra")
 
     def test_nothing_added(self):
         we = self._we()
@@ -300,10 +297,7 @@ class TestExtraContext(unittest.TestCase):
 class TestEngineSignature(unittest.TestCase):
     def test_signature_matches_kernel(self):
         """Если ядро сменит сигнатуру _call_summary_llm — warm должен отключиться, а не падать."""
-        spec = importlib.util.spec_from_file_location("we_under_test", PLUGIN_DIR / "warm_engine.py")
-        assert spec is not None and spec.loader is not None
-        we = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(we)
+        we = load_plugin_module("warm_engine.py", "we_under_test")
         ok, why = we.signature_ok()
         self.assertTrue(ok, why)
 

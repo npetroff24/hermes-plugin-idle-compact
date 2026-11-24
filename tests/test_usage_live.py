@@ -1,5 +1,4 @@
 """Живой замер usage из события post_api + безопасная запись кеша."""
-import importlib.util
 import json
 import sys
 import tempfile
@@ -7,17 +6,13 @@ import time
 import unittest
 from pathlib import Path
 from types import ModuleType
+from _bootstrap import load_plugin_root
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 
 
 def load_init():
-    spec = importlib.util.spec_from_file_location("ic_under_test", PLUGIN_DIR / "__init__.py")
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["ic_under_test"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    return load_plugin_root("ic_under_test")
 
 
 class UsageLiveBase(unittest.TestCase):

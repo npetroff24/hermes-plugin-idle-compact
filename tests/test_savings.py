@@ -15,12 +15,9 @@ from pathlib import Path
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_DIR))
 
-import importlib.util
+from _bootstrap import load_plugin_module
 
-_spec = importlib.util.spec_from_file_location("savings_under_test", PLUGIN_DIR / "savings.py")
-assert _spec is not None and _spec.loader is not None, "cannot load savings.py"
-savings = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(savings)
+savings = load_plugin_module("savings.py", "savings_under_test")
 
 
 def _make_db(path: Path, rows: list[tuple]) -> None:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 import threading
 import time
@@ -12,15 +11,11 @@ from pathlib import Path
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_DIR))
 
-from _bootstrap import AGENT_HOME  # noqa: E402,F401  (кладёт исходники ядра в sys.path)
+from _bootstrap import AGENT_HOME, load_plugin_module  # noqa: E402,F401  (кладёт исходники ядра в sys.path)
 
 
 def _load():
-    spec = importlib.util.spec_from_file_location("we_test", PLUGIN_DIR / "warm_engine.py")
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    return load_plugin_module("warm_engine.py", "we_test")
 
 
 class TestClone(unittest.TestCase):
@@ -183,12 +178,7 @@ class TestMessagesApi(unittest.TestCase):
             def update_model(self, *a, **k):
                 pass
 
-        spec = importlib.util.spec_from_file_location(
-            "wepkg_fake.warm_engine", PLUGIN_DIR / "warm_engine.py")
-        assert spec is not None and spec.loader is not None
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["wepkg_fake.warm_engine"] = mod
-        spec.loader.exec_module(mod)
+        mod = load_plugin_module("warm_engine.py", "wepkg_fake.warm_engine")
         mod._import_base = lambda: FakeBase  # type: ignore[attr-defined]
         mod.IdleWarmCompressor._cls = None
         engine_cls = mod.IdleWarmCompressor.build()
@@ -275,12 +265,7 @@ class TestFallbackOutsideHandler(unittest.TestCase):
                     sys.modules[k] = v
         self.addCleanup(_restore)
 
-        spec = importlib.util.spec_from_file_location(
-            "wf12.warm_engine", PLUGIN_DIR / "warm_engine.py")
-        assert spec is not None and spec.loader is not None
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["wf12.warm_engine"] = mod
-        spec.loader.exec_module(mod)
+        mod = load_plugin_module("warm_engine.py", "wf12.warm_engine")
         return mod, applied
 
     def _engine(self, stale=True):
