@@ -291,31 +291,40 @@ function Hero({ snap }) {
   const caption = base > 0
     ? `${fmtUsd(net)} of $${Math.abs(base).toFixed(2)} without the plugin`
     : `${fmtUsd(net)} saved so far`
+  // The ledger sits on the headline's own line, right aligned and on the
+  // baseline of the "saved" word. As a second line under a 22px figure it read
+  // as a second headline and pushed the scale down the panel.
   return jsx('div', {
     style: { padding: '2px 0 10px' },
-    children: [
-      jsx('div', {
-        key: 'v',
-        style: { display: 'flex', alignItems: 'baseline', gap: 6 },
-        children: [
-          jsx('span', {
-            key: 'p',
-            style: {
-              fontSize: '1.375rem', fontWeight: 600, lineHeight: 1.1,
-              letterSpacing: '-0.02em', fontVariantNumeric: 'tabular-nums',
-              color: 'var(--ui-text-primary)'
-            },
-            children: pct === null ? fmtUsd(net) : `${pct}%`
-          }),
-          jsx('span', {
-            key: 'w',
-            style: { fontSize: '0.75rem', color: 'var(--ui-text-tertiary)' },
-            children: 'saved'
-          })
-        ]
-      }),
-      jsx(Caption, { key: 'c', children: caption })
-    ]
+    children: jsx('div', {
+      key: 'v',
+      style: { display: 'flex', alignItems: 'baseline', gap: 6 },
+      children: [
+        jsx('span', {
+          key: 'p',
+          style: {
+            fontSize: '1.375rem', fontWeight: 600, lineHeight: 1.1,
+            letterSpacing: '-0.02em', fontVariantNumeric: 'tabular-nums',
+            color: 'var(--ui-text-primary)'
+          },
+          children: pct === null ? fmtUsd(net) : `${pct}%`
+        }),
+        jsx('span', {
+          key: 'w',
+          style: { fontSize: '0.75rem', color: 'var(--ui-text-tertiary)' },
+          children: 'saved'
+        }),
+        jsx('span', {
+          key: 'c',
+          style: {
+            marginLeft: 'auto', minWidth: 0, textAlign: 'right',
+            fontSize: '0.625rem', lineHeight: 1.35,
+            color: 'var(--ui-text-tertiary)', fontVariantNumeric: 'tabular-nums'
+          },
+          children: caption
+        })
+      ]
+    })
   })
 }
 
