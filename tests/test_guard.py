@@ -1,20 +1,14 @@
 """Guard от двойного сжатия: ядро сжало — таймер пропускает."""
-import importlib.util
-import sys
 import time
 import unittest
 from pathlib import Path
+from _bootstrap import load_plugin_root
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 
 
 def load_init():
-    spec = importlib.util.spec_from_file_location("ic_under_test", PLUGIN_DIR / "__init__.py")
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["ic_under_test"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    return load_plugin_root("ic_under_test")
 
 
 class TestPostCompactionGuard(unittest.TestCase):
@@ -58,6 +52,50 @@ class TestPostCompactionGuard(unittest.TestCase):
 
     def test_apply_core_size_no_record(self):
         self.assertEqual(self.mod._apply_core_size("nope", 100000), 100000)
+
+    def test_apply_core_size_caps_only_measurement_before_compaction(self):
+        """Замер, сделанный ДО сжатия, подменяем; сделанный после — нет."""
+        self.mod._on_post_compaction(session_id="s7", after_tokens=50000)
+        rec = self.mod._core_record("s7")
+        assert rec is not None
+        compacted_at = rec[0]
+        # Замер раньше сжатия: подмена работает (ради этого guard и заведён).
+        self.assertEqual(
+            self.mod._apply_core_size("s7", 300000, measured_at=compacted_at - 1), 50000)
+        # Замер позже сжатия: сессия выросла, 50К — это прошлое, не размер.
+        self.assertEqual(
+            self.mod._apply_core_size("s7", 300000, measured_at=compacted_at + 1), 300000)
+
+    def test_fire_does_not_cap_session_that_grew_after_compaction(self):
+        """P1 из ревью: сжатая до 50К и выросшая до 300К сессия идёт в сжатие.
+
+        Без правки гейт видел min(300000, 50000) и скипал сессию до конца
+        жизни записи о сжатии (четыре часа).
+        """
+        closed = []
+        compaction = self.mod._on_post_compaction
+        compaction(session_id="s-grown", after_tokens=50000)
+        rec = self.mod._core_record("s-grown")
+        assert rec is not None
+        compacted_at = rec[0]
+        grew_at = compacted_at + 5
+
+        class Comp:
+            context_length = 1_000_000
+            last_prompt_tokens = 300000
+
+        self.mod._session_row = (  # type: ignore[attr-defined]
+            lambda sid: {"id": sid, "source": "gui", "last_activity_at": grew_at})
+        self.mod._resident = lambda sid: (object(), Comp(), "route", object())  # type: ignore[attr-defined]
+        self.mod._gate_floor = lambda comp, sid=None: 100000  # type: ignore[attr-defined]
+        self.mod._estimate_history = lambda comp, sid: None  # type: ignore[attr-defined]
+        self.mod._note_window = lambda model, window: None  # type: ignore[attr-defined]
+        self.mod._note_usage = lambda sid, tokens: None  # type: ignore[attr-defined]
+        self.mod._do_compress = lambda sid, model, size, ctx, **kw: closed.append(size)  # type: ignore[attr-defined]
+        self.mod._forget = lambda sid: None  # type: ignore[attr-defined]
+
+        self.mod._fire("s-grown", grew_at, "m")
+        self.assertEqual(closed, [300000], "сжатие обязано видеть реальные 300000")
 
     def test_fire_skips_when_core_compacted_after_arm(self):
         calls = []

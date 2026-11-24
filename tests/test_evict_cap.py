@@ -1,20 +1,17 @@
 """Задержка таймера = min(TTL модели, TTL выселения агента) минус 30 с."""
-import importlib.util
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
+from _bootstrap import load_plugin_root
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 
 
 def load_init():
-    spec = importlib.util.spec_from_file_location("ic_under_test", PLUGIN_DIR / "__init__.py")
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["ic_under_test"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    return load_plugin_root("ic_under_test")
 
 
 class TestEvictCap(unittest.TestCase):
@@ -60,6 +57,86 @@ class TestEvictCap(unittest.TestCase):
         # Второй вызов молчит — подсказка одноразовая.
         with self.assertNoLogs("ic_under_test", level="WARNING"):
             mod._delay_for_model("deepseek-v4.1-flash")
+
+
+class _SyncThread:
+    """Поток-заглушка: работа сжатия выполняется в тесте сразу."""
+
+    def __init__(self, target=None, **kw):
+        self._target = target
+
+    def start(self):
+        if self._target is not None:
+            self._target()
+
+
+class TestCompressSuccessFlag(unittest.TestCase):
+    """Флаг успеха сжатия доходит до guard'а выселения (nonlocal в run()).
+
+    Без nonlocal запись уходила в локальную переменную run(), внешний
+    did_compress оставался False, и агент после успешного сжатия не
+    выселялся никогда.
+    """
+
+    def _mod(self):
+        mod = load_init()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        (Path(tmp.name) / "config.yaml").write_text("other: 1" + chr(10), encoding="utf-8")
+        mod._home = lambda: Path(tmp.name)  # type: ignore[attr-defined]
+        mod._gate_floor = lambda comp, sid=None: 1  # type: ignore[attr-defined]
+        mod._capture_for = lambda sid: None  # type: ignore[attr-defined]
+        return mod
+
+    def _agent(self, aborted=False):
+        history = [{"role": "user", "content": "x" * 40},
+                   {"role": "assistant", "content": "y" * 40}]
+
+        class Comp:
+            awaiting_real_usage_after_compression = False
+            _compression_skipped_due_to_lock = False
+            context_length = 1_000_000
+
+            class _DB:
+                @staticmethod
+                def get_messages_as_conversation(sid):
+                    return history
+
+            _session_db = _DB()
+
+        agent = types.SimpleNamespace(
+            compression_enabled=True,
+            api_mode="chat_completions",
+            compression_checkpoint_required=False,
+            context_compressor=Comp(),
+            _last_compress_aborted=aborted,
+            _compress_context=lambda messages, text, **kw: None,
+        )
+        return agent
+
+    def _run(self, mod, agent, runner):
+        fake_gw = types.SimpleNamespace(
+            _cached_agent_for_hygiene=lambda runner_ref, route: agent,
+            _gateway_runner_ref=lambda: runner,
+        )
+        with mock.patch.dict(sys.modules, {"gateway.run": fake_gw}),                 mock.patch.object(mod.threading, "Thread", _SyncThread):
+            mod._do_compress("s-flag", "m", 500000, None,
+                             agent=agent, route="route-1", runner=runner)
+
+    def test_successful_compression_evicts_agent(self):
+        mod = self._mod()
+        evicted = []
+        runner = types.SimpleNamespace(_evict_cached_agent=evicted.append)
+        self._run(mod, self._agent(), runner)
+        self.assertEqual(evicted, ["route-1"],
+                         "успешное сжатие обязано выселять агента")
+
+    def test_aborted_compression_keeps_agent(self):
+        mod = self._mod()
+        evicted = []
+        runner = types.SimpleNamespace(_evict_cached_agent=evicted.append)
+        self._run(mod, self._agent(aborted=True), runner)
+        self.assertEqual(evicted, [], "прерванное сжатие агент не выселяет")
 
 
 if __name__ == "__main__":

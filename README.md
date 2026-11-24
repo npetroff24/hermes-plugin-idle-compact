@@ -113,12 +113,17 @@ focus topic are appended after the captured prefix, so the cache stays warm.
 The warm engine supports both summary APIs: `prompt: str` (older core) and
 `messages: [system, user]` (newer core) — the branch is picked from the live
 base-class signature.
-Desktop also shows a status-bar chip (`~185K left`, or `Ready`
-past the gate); click it for the full panel as a popup.
+Desktop also shows a status-bar chip: a glyph and the share of cost the
+plugin has saved (`42%`), because the bar is 20px tall and the remainder
+needs a sentence next to it. Click the chip for the panel: the percentage,
+the money behind it, this chat against the idle gate, and the ledger
+breakdown. Both the chip and the panel draw figures the plugin counts
+(`savings`, `chat`, `bar`) — the renderer computes nothing.
 The chip updates by push after every turn, so it also works over SSH,
-where direct RPC answers `-32601`. Status rides the session event stream —
-the same channel as chat messages — with a global broadcast as fallback.
-Switching chats resets the chip instead of showing stale numbers.
+where direct RPC answers `-32601`; the click asks for the exact core count.
+Status rides the session event stream — the same channel as chat messages —
+with a global broadcast as fallback. Switching chats drops the figures of the
+chat you left; the savings share is a lifetime number, so it stays.
 
 ## Rollback
 
@@ -270,11 +275,16 @@ hermes config set plugins.idle_compact.gate_fraction 0.2
 дописываются в конец запроса, поэтому кеш не ломается. Движок поддерживает
 оба API суммирования: `prompt: str` (старое ядро) и `messages: [system, user]`
 (новое ядро) — ветка выбирается по живой сигнатуре базового класса.
-В десктопе — чип в статус-баре (`~185K left`, выше порога `Ready`); клик —
-полная панель всплывашкой. Чип обновляется push'ем после каждого хода,
-поэтому работает и по SSH, где прямой RPC отвечает `-32601`. Статус едет
-событием на канале сессии — том же, что сообщения чата, — с глобальным
-broadcast как запаской. Смена чата сбрасывает чип, а не показывает чужие цифры.
+В десктопе — чип в статус-баре: глиф и доля сэкономленного за всё время
+(`42%`). В 20px бара не помещается ещё и остаток: остатку нужна фраза рядом,
+и её говорит панель по клику — процент, деньги за ним, состояние этого чата
+против порога простоя и разбивка леджера. И чип, и панель рисуют цифры,
+которые считает сам плагин (`savings`, `chat`, `bar`), — в отрисовке ничего
+не вычисляется. Чип обновляется push'ем после каждого хода, поэтому работает
+и по SSH, где прямой RPC отвечает `-32601`; клик запрашивает точное число
+ядра. Статус едет событием на канале сессии — том же, что сообщения чата, —
+с глобальным broadcast как запаской. Смена чата убирает цифры покинутого
+чата; процент экономии общий за всё время, поэтому остаётся.
 
 ## Откат
 

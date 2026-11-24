@@ -10,7 +10,7 @@ from pathlib import Path
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_DIR))
 
-from _bootstrap import AGENT_HOME  # noqa: E402,F401  (кладёт исходники ядра в sys.path)
+from _bootstrap import AGENT_HOME, load_plugin_module  # noqa: E402,F401  (кладёт исходники ядра в sys.path)
 
 _spec = importlib.util.spec_from_file_location("wc_under_test", PLUGIN_DIR / "warm_client.py")
 assert _spec is not None and _spec.loader is not None
@@ -204,10 +204,23 @@ class TestNoOutputCap(unittest.TestCase):
                                 "сожми", "codex_responses", None)
         self.assertNotIn("max_output_tokens", body)
 
-    def test_anthropic_without_cap(self):
+    def test_anthropic_without_cap_keeps_required_budget(self):
+        """Anthropic требует max_tokens: без него релей отвечает 400.
+
+        Раньше поле удалялось (body.pop) и весь warm-путь падал на этом
+        транспорте. Запасной бюджет — не меньше 1500: при меньшем reasoning
+        съедает его целиком и текста саммари не остаётся (AGENTS.md).
+        """
         body = wc.build_payload({"messages": [{"role": "user", "content": "hi"}]},
                                 "сожми", "anthropic_messages", None)
-        self.assertNotIn("max_tokens", body)
+        self.assertEqual(body["max_tokens"], wc.ANTHROPIC_MIN_MAX_TOKENS)
+        self.assertGreaterEqual(body["max_tokens"], 1500)
+
+    def test_anthropic_fallback_replaces_capture_budget(self):
+        """Захваченный max_tokens основного чата не утекает и без бюджета."""
+        body = wc.build_payload({"messages": [{"role": "user", "content": "hi"}],
+                                 "max_tokens": 128}, "сожми", "anthropic_messages", None)
+        self.assertEqual(body["max_tokens"], wc.ANTHROPIC_MIN_MAX_TOKENS)
 
     def test_explicit_cap_from_capture_dropped(self):
         """Захват мог содержать max_tokens основного чата — он не должен утечь."""
@@ -242,10 +255,7 @@ class TestTruncationGuard(unittest.TestCase):
 
 class TestExtraContext(unittest.TestCase):
     def _we(self):
-        spec = importlib.util.spec_from_file_location("we_extra", PLUGIN_DIR / "warm_engine.py")
-        we = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(we)
-        return we
+        return load_plugin_module("warm_engine.py", "we_extra")
 
     def test_nothing_added(self):
         we = self._we()
@@ -287,10 +297,7 @@ class TestExtraContext(unittest.TestCase):
 class TestEngineSignature(unittest.TestCase):
     def test_signature_matches_kernel(self):
         """Если ядро сменит сигнатуру _call_summary_llm — warm должен отключиться, а не падать."""
-        spec = importlib.util.spec_from_file_location("we_under_test", PLUGIN_DIR / "warm_engine.py")
-        assert spec is not None and spec.loader is not None
-        we = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(we)
+        we = load_plugin_module("warm_engine.py", "we_under_test")
         ok, why = we.signature_ok()
         self.assertTrue(ok, why)
 

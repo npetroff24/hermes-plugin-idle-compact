@@ -16,6 +16,7 @@ import logging
 import os
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -330,14 +331,16 @@ def _live_gate(comp=None, session_id: str | None = None, cfg: dict | None = None
             pass
     if cfg is None:
         cfg = _read_config()
+    window = int(getattr(comp, "context_length", 0) or 0)
     frac = _gate_fraction(session_id, cfg)
-    if frac > 0:
-        window = int(getattr(comp, "context_length", 0) or 0)
-        if window > 0:
-            # Порог от ФАКТИЧЕСКОГО окна модели: не зависит от lean/legacy,
-            # threshold и target_ratio — одна понятная величина.
-            return int(frac * window)
-    target = _live_target(cfg=cfg)
+    if frac > 0 and window > 0:
+        # Порог от ФАКТИЧЕСКОГО окна модели: не зависит от lean/legacy,
+        # threshold и target_ratio — одна понятная величина.
+        return int(frac * window)
+    # Без доли и без окна — прежняя формула. Окно передаём тем же источником,
+    # что и _gate_floor: доля в compression.threshold без фактического окна не
+    # считается (AGENTS.md), а явный threshold_tokens остаётся главнее окна.
+    target = _live_target(window_tokens=window or None, cfg=cfg)
     return int(target * GATE_K) if target else None
 
 
@@ -507,16 +510,24 @@ def _core_record(session_id: str) -> tuple[float, int | None] | None:
         return rec
 
 
-def _apply_core_size(session_id: str, size: int) -> int:
+def _apply_core_size(session_id: str, size: int,
+                     measured_at: float | None = None) -> int:
     """Свежий размер из записи ядра вместо протухшей оценки.
 
     ``last_prompt_tokens`` обновляется только на запросах, а ядерное сжатие
     запроса не делает — без этого таймер видел бы старый большой размер.
+
+    Подмена действует, только пока замер СТАРШЕ сжатия (``measured_at``).
+    Замер, сделанный после него, уже описывает сжатый контекст: сессия,
+    выросшая с 50К до 300К после сжатия, не должна читаться как 50К — иначе
+    гейт не срабатывает до конца жизни записи (четыре часа).
     """
     rec = _core_record(session_id)
-    if rec is not None and rec[1] is not None:
-        return min(size, rec[1])
-    return size
+    if rec is None or rec[1] is None:
+        return size
+    if measured_at is not None and measured_at > rec[0]:
+        return size
+    return min(size, rec[1])
 
 # Ожидающие таймеры переживают reload плагина: {session_id: {deadline, stamp, model}}
 _PENDING_FILE = "idle_compact_pending.json"
@@ -527,13 +538,14 @@ def _pending_path() -> Path:
 
 
 @contextlib.contextmanager
-def _pending_guard():
+def _file_guard(path: Path):
     """Эксклюзивный доступ к файлу состояния между процессами.
 
     Без этого 89 загрузок плагина в сутки перетирали чужие записи: каждый
     процесс писал «только то, что восстановил он», и таймеры терялись.
+    Блокировка лежит в файле ``<имя>.lock'' рядом с состоянием: у каждого
+    файла она своя, а имя то же, что у прежней `_pending_guard`.
     """
-    path = _pending_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(".lock")
     fh = None
@@ -545,7 +557,7 @@ def _pending_guard():
 
         _lock_fh(fh)
     except Exception:
-        logger.debug("idle-compact: pending lock unavailable", exc_info=True)
+        logger.debug("idle-compact: state lock unavailable for %s", path, exc_info=True)
     try:
         yield
     finally:
@@ -559,6 +571,13 @@ def _pending_guard():
                 fh.close()
             except Exception:
                 pass
+
+
+@contextlib.contextmanager
+def _pending_guard():
+    """Эксклюзивный доступ к файлу дедлайнов (см. `_file_guard`)."""
+    with _file_guard(_pending_path()):
+        yield
 
 
 def _load_pending() -> dict[str, dict]:
@@ -661,20 +680,34 @@ def _note_usage(session_id: str, tokens: int) -> None:
             if now - pts < 10.0 and abs(tokens - ptok) <= max(1, ptok // 100):
                 return
         path = _usage_path()
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            data = data if isinstance(data, dict) else {}
-        except Exception:
-            data = {}
-        data = {k: v for k, v in data.items()
-                if now - float((v or {}).get("ts") or 0) < 7 * 86400}
-        if (data.get(session_id) or {}).get("tokens") == tokens:
-            _usage_last_write[session_id] = (now, tokens)
-            return
-        data[session_id] = {"tokens": tokens, "ts": now}
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, path)
+        # Вся последовательность чтение → слияние → os.replace под тем же
+        # эксклюзивным локом, что и файл дедлайнов: иначе gateway и serve
+        # читают одно состояние, каждый дописывает своё, и последний
+        # затирает чужую сессию целиком.
+        with _file_guard(path):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                data = data if isinstance(data, dict) else {}
+            except Exception:
+                data = {}
+            data = {k: v for k, v in data.items()
+                    if now - float((v or {}).get("ts") or 0) < 7 * 86400}
+            if (data.get(session_id) or {}).get("tokens") == tokens:
+                _usage_last_write[session_id] = (now, tokens)
+                return
+            data[session_id] = {"tokens": tokens, "ts": now}
+            # Уникальный файл в том же каталоге: общий `<имя>.tmp` два
+            # писателя дописывали в один и тот же буфер.
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps(data, ensure_ascii=False))
+                os.replace(tmp_name, path)
+            except Exception:
+                with contextlib.suppress(Exception):
+                    os.unlink(tmp_name)
+                raise
         _usage_last_write[session_id] = (now, tokens)
     except Exception:
         logger.debug("idle-compact: usage cache write failed", exc_info=True)
@@ -1027,7 +1060,10 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
             floor = gate
         size = exact if exact is not None else _rough_tokens(session_id)
         # Guard: свежий размер из записи ядра вместо протухшей оценки.
-        size = _apply_core_size(session_id, size)
+        # ``last_ts`` — момент последнего хода сессии: он же верхняя граница
+        # времени замера (``last_prompt_tokens`` пишется запросом, оценка
+        # читает БД, которую тот же ход и обновил).
+        size = _apply_core_size(session_id, size, measured_at=last_ts or None)
         idle_min = (time.time() - last_ts) / 60 if last_ts else -1
         if size <= floor:
             logger.info(
@@ -1388,6 +1424,10 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None,
                 kwargs["commit_fence"] = fence
 
             def run() -> None:
+                # Флаг успеха живёт во внешней функции: без nonlocal запись
+                # уходила в локальную переменную run(), а guard выселения в
+                # finally читал всегда False.
+                nonlocal did_compress
                 # Включаем warm-путь: префикс = последний реальный запрос сессии.
                 engine = getattr(agent, "context_compressor", None)
                 warm_on = False
@@ -1916,7 +1956,10 @@ def _breakdown_size(session_id: str | None) -> int | None:
 def _rpc_status(params=None, session_id: str | None = None, _exact: bool = True, **kwargs):
     """RPC ``plugin.idle-compact.status`` для десктопной половины.
 
-    Возвращает JSON: короткая строка чипа + полная панель тоста.
+    Возвращает JSON. Цифры — ``savings``, ``chat`` и ``bar``: панель только
+    рисует, все проценты и пороги считает Python. ``chip`` и ``panel``
+    остаются коротким текстом для половины, которая ещё живёт в
+    неперезапущенном приложении.
     Сессия — из params (активная вкладка) или из контекста вызова.
     ``_exact`` — точное число ядра вместо usage (клик/переключение чата);
     внутренний пуш зовёт с ``_exact=False`` (дешево, на каждый ход).
@@ -1926,14 +1969,24 @@ def _rpc_status(params=None, session_id: str | None = None, _exact: bool = True,
         sid = params.get("session_id") or session_id
         exact = _breakdown_size(sid) if _exact else None
         size, gate = _panel_context(sid, exact=exact)
+        stats = _ledger_stats()
+        chat = _chat_state(sid, size, gate)
         if size is not None and gate:
             chip = "Ready" if size >= gate else f"{_fmt_k(gate - size)} left"
         else:
             chip = "idle-compact"
-        panel = _toast_panel(sid, exact=exact)
-        return {"chip": chip, "panel": panel, "bar": _bar_numbers(sid, exact=exact)}
+        return {
+            "chip": chip,
+            "panel": _toast_panel(sid, size=size, gate=gate, stats=stats, chat=chat),
+            "bar": _bar_numbers(sid, size=size, gate=gate),
+            "savings": _savings_numbers(stats),
+            "chat": chat,
+            "version": _STATUS_VERSION,
+        }
     except Exception as exc:
-        return {"chip": "idle-compact", "panel": f"idle-compact: status failed ({exc})"}
+        return {"chip": "idle-compact",
+                "panel": f"idle-compact: status failed ({exc})",
+                "version": _STATUS_VERSION}
 
 
 def _cmd_status(raw_args: str = "", session_id: str | None = None, _exact_size: int | None = None) -> str:
@@ -1947,20 +2000,20 @@ def _cmd_status(raw_args: str = "", session_id: str | None = None, _exact_size: 
         return _cmd_debug(session_id=session_id)
     lines = [f"idle-compact {_STATUS_VERSION}"]
     stats = _ledger_stats()
-    if stats is None or stats["events"] <= 0:
+    saved = _savings_numbers(stats)
+    if saved is None:
         lines.append("compactions counted: 0")
     else:
-        money = f"saved: {_fmt_money(stats['net'])}"
-        if stats["base"] > 0:
-            pct = int(round(100 * stats["net"] / stats["base"]))
-            money += f" — that's {pct}% of costs without the plugin"
+        money = f"saved: {_fmt_money(saved['net'])}"
+        if saved["pct"] is not None:
+            money += f" — that's {saved['pct']}% of costs without the plugin"
         lines.append(money)
-        brk = f"paid off {stats['plus_n']} · wasted {stats['waste_n']}"
-        if stats["unmeasured_n"] > 0:
-            brk += f" · {stats['unmeasured_n']} more not counted (cost not saved)"
+        brk = f"paid off {saved['paid']} · wasted {saved['wasted']}"
+        if saved["uncounted"] > 0:
+            brk += f" · {saved['uncounted']} more not counted (cost not saved)"
         lines.append(brk)
-        if stats["last_ts"] > 0:
-            lines.append(f"last compaction: {_fmt_ts(stats['last_ts'])}")
+        if saved["last_ts"] > 0:
+            lines.append(f"last compaction: {_fmt_ts(saved['last_ts'])}")
     size, gate = _panel_context(session_id, exact=_exact_size)
     if size is not None:
         src = "core count" if _exact_size else "provider usage"
@@ -1999,16 +2052,19 @@ def _fmt_dur(seconds: float) -> str:
     return f"~{s}s"
 
 
-def _bar_numbers(session_id: str | None, exact: int | None = None) -> dict | None:
+def _bar_numbers(session_id: str | None, exact: int | None = None,
+                 size: int | None = None, gate: int | None = None) -> dict | None:
     """Цифры шкалы чипа: {used, idle_gate, threshold}. Нет данных — None.
 
     Шкала — от 0 до порога ядра (не до окна: окно показывает сам Hermes).
-    JS только рисует, не считает.
+    JS только рисует, не считает. ``size``/``gate`` — уже посчитанные
+    вызывающим: один статус считает их один раз на всю отдачу.
     """
     if not session_id:
         return None
     try:
-        size, gate = _panel_context(session_id, exact=exact)
+        if size is None or gate is None:
+            size, gate = _panel_context(session_id, exact=exact)
         if size is None or not gate:
             return None
         cfg = _read_config()
@@ -2027,39 +2083,84 @@ def _bar_numbers(session_id: str | None, exact: int | None = None) -> dict | Non
         return None
 
 
-def _toast_panel(session_id: str | None, exact: int | None = None) -> str:
+def _savings_numbers(stats: dict | None) -> dict | None:
+    """Деньги сэкономленного цифрами, для чипа и панели. Нет событий — None.
+
+    ``pct`` — доля сэкономленного от того, что эти сжатия стоили бы без
+    плагина; None, когда базлайна нет (считать процент не из чего).
+    Формула здесь одна: и ``/idle-compact``, и панель берут её отсюда.
+    """
+    if not stats or stats.get("events", 0) <= 0:
+        return None
+    pct = None
+    try:
+        if stats["base"] > 0:
+            pct = int(round(100 * stats["net"] / stats["base"]))
+    except Exception:
+        pct = None
+    try:
+        return {
+            "pct": pct,
+            "net": round(float(stats["net"]), 5),
+            "base": round(float(stats["base"]), 5),
+            "paid": int(stats["plus_n"]),
+            "wasted": int(stats["waste_n"]),
+            "uncounted": int(stats["unmeasured_n"]),
+            "events": int(stats["events"]),
+            "last_ts": float(stats["last_ts"]),
+        }
+    except Exception:
+        return None
+
+
+def _chat_state(session_id: str | None, size: int | None, gate: int | None) -> dict:
+    """Состояние этой сессии для панели: ``key`` для тона, ``label``, ``eta_s``.
+
+    Подпись — одна короткая строка без служебных слов: панель ставит её
+    значением строки «This chat».
+    """
+    if _core_record(session_id or "") is not None:
+        return {"key": "core", "label": "Core owns it — standing by", "eta_s": 0}
+    if size is None or not gate:
+        return {"key": "unknown", "label": "No measurements yet", "eta_s": 0}
+    if size < gate:
+        return {"key": "below_gate", "label": "Below gate — won't touch", "eta_s": 0}
+    left = 0
+    try:
+        entry = (_load_pending() or {}).get(session_id or "") or {}
+        left = int(float(entry.get("deadline") or 0) - time.time())
+    except Exception:
+        left = 0
+    if left > 0:
+        return {"key": "ready", "label": f"Will compact after {_fmt_dur(left)} idle",
+                "eta_s": left}
+    return {"key": "ready", "label": "Will compact while idle", "eta_s": 0}
+
+
+def _toast_panel(session_id: str | None, exact: int | None = None,
+                 size: int | None = None, gate: int | None = None,
+                 stats: dict | None = None, chat: dict | None = None) -> str:
     """Короткая панель тоста: состояние + деньги. Детали — в /idle-compact.
 
     Контекст в цифрах не показываем: его показывает сам Hermes.
+    ``size``/``gate``/``stats``/``chat`` — уже посчитанные вызывающим, чтобы
+    один статус не читал конфиг, базу и леджер по два раза.
     """
     try:
-        state = "No measurements yet"
-        size, gate = _panel_context(session_id, exact=exact)
-        if _core_record(session_id or "") is not None:
-            state = "Core owns it — standing by"
-        elif size is not None and gate:
-            if size < gate:
-                state = "Below gate — won't touch"
-            else:
-                when = ""
-                try:
-                    entry = (_load_pending() or {}).get(session_id or "") or {}
-                    left = float(entry.get("deadline") or 0) - time.time()
-                    if left > 0:
-                        when = f" after {_fmt_dur(left)} idle"
-                except Exception:
-                    when = ""
-                state = f"Will compact{when} while idle" if when else "Will compact while idle"
-        stats = _ledger_stats()
+        if chat is None:
+            if size is None or gate is None:
+                size, gate = _panel_context(session_id, exact=exact)
+            chat = _chat_state(session_id, size, gate)
+        state = str((chat or {}).get("label") or "No measurements yet")
+        saved = _savings_numbers(stats if stats is not None else _ledger_stats())
         money = ""
-        if stats is not None and stats["events"] > 0:
-            money = f"saved: {_fmt_money(stats['net'])}"
-            if stats["base"] > 0:
-                pct = int(round(100 * stats["net"] / stats["base"]))
-                money += f" — that's {pct}%"
-            money += f" · paid {stats['plus_n']} · wasted {stats['waste_n']}"
-            if stats["unmeasured_n"] > 0:
-                money += f" · {stats['unmeasured_n']} uncounted"
+        if saved is not None:
+            money = f"saved: {_fmt_money(saved['net'])}"
+            if saved["pct"] is not None:
+                money += f" — that's {saved['pct']}%"
+            money += f" · paid {saved['paid']} · wasted {saved['wasted']}"
+            if saved["uncounted"] > 0:
+                money += f" · {saved['uncounted']} uncounted"
         return state if not money else f"{state}\n{money}"
     except Exception as exc:
         return f"idle-compact: status failed ({exc})"

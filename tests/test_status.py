@@ -10,17 +10,13 @@ import time
 import unittest
 from pathlib import Path
 from unittest import mock
+from _bootstrap import load_plugin_root
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 
 
 def load_init():
-    spec = importlib.util.spec_from_file_location("ic_under_test", PLUGIN_DIR / "__init__.py")
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["ic_under_test"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    return load_plugin_root("ic_under_test")
 
 
 def load_savings():
@@ -394,6 +390,90 @@ class TestRpcStatus(StatusBase):
         mod.register(ctx)
         self.addCleanup(mod.unregister, None)
         self.assertIn("rpc:status", ctx.commands)
+
+
+class TestRpcPanelData(StatusBase):
+    """Панель получает цифры, а не текст: JS только рисует.
+
+    Чип в статус-баре показывает процент экономии, а не остаток токенов,
+    поэтому ``savings.pct`` и ``chat`` обязаны приходить посчитанными.
+    """
+
+    def _home_with_numbers(self, tokens=10000, deadline_in=0):
+        mod, home = self._mod_with_home(
+            "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n"
+        )
+        self._db_with_session(home, chars=40000)
+        (home / "idle_compact_windows.json").write_text(
+            json.dumps({"m": 1000000}), encoding="utf-8")
+        (home / "idle_compact_usage.json").write_text(
+            json.dumps({"s1": {"tokens": tokens, "ts": time.time()}}),
+            encoding="utf-8")
+        (home / "idle_compact_ledger.jsonl").write_text("\n".join(json.dumps(e) for e in [
+            {"ev": "settle", "ts": 1794728400.0, "saved_usd": 0.06,
+             "baseline_usd": 0.10, "verdict": "предотвращён холодный вход",
+             "facts": {"input": 10, "cache_read": 100, "output": 5, "calls": 1}},
+            {"ev": "settle", "ts": 1794728410.0, "saved_usd": -0.01,
+             "baseline_usd": 0.02, "verdict": "кеш был бы тёплым",
+             "facts": {"input": 10, "cache_read": 100, "output": 5, "calls": 1}},
+        ]) + "\n", encoding="utf-8")
+        if deadline_in:
+            now = time.time()
+            (home / "idle_compact_pending.json").write_text(json.dumps({
+                "s1": {"pid": os.getpid(), "deadline": now + deadline_in,
+                       "stamp": now, "model": "m"},
+            }), encoding="utf-8")
+        return mod, home
+
+    def test_savings_numbers(self):
+        mod, _home = self._home_with_numbers()
+        savings = mod._rpc_status({"session_id": "s1"})["savings"]
+        # net +0.05 из базы 0.12 → 42% — та же формула, что в /idle-compact
+        self.assertEqual(savings["pct"], 42)
+        self.assertAlmostEqual(savings["net"], 0.05)
+        self.assertAlmostEqual(savings["base"], 0.12)
+        self.assertEqual(savings["paid"], 1)
+        self.assertEqual(savings["wasted"], 1)
+        self.assertEqual(savings["events"], 2)
+        self.assertEqual(savings["last_ts"], 1794728410.0)
+
+    def test_chat_state_below_gate(self):
+        mod, _home = self._home_with_numbers()
+        chat = mod._rpc_status({"session_id": "s1"})["chat"]
+        self.assertEqual(chat["key"], "below_gate")
+        self.assertEqual(chat["eta_s"], 0)
+        self.assertIn("Below gate", chat["label"])
+
+    def test_chat_state_ready_carries_eta(self):
+        mod, _home = self._home_with_numbers(tokens=500000, deadline_in=600)
+        chat = mod._rpc_status({"session_id": "s1"})["chat"]
+        self.assertEqual(chat["key"], "ready")
+        self.assertGreater(chat["eta_s"], 500)
+        self.assertIn("Will compact after", chat["label"])
+
+    def test_no_ledger_means_no_percent(self):
+        mod, home = self._mod_with_home()
+        self._db_with_session(home)
+        (home / "idle_compact_windows.json").write_text(
+            json.dumps({"m": 1000000}), encoding="utf-8")
+        (home / "idle_compact_usage.json").write_text(
+            json.dumps({"s1": {"tokens": 10000, "ts": time.time()}}),
+            encoding="utf-8")
+        res = mod._rpc_status({"session_id": "s1"})
+        # без леджера чип покажет только глиф: процент считать не из чего
+        self.assertIsNone(res["savings"])
+
+    def test_version_travels_with_status(self):
+        mod, _home = self._mod_with_home()
+        self.assertIn("version", mod._rpc_status({}))
+
+    def test_panel_text_still_matches_state(self):
+        # chip/panel остаются для старой половины в неперезапущенном приложении
+        mod, _home = self._home_with_numbers()
+        res = mod._rpc_status({"session_id": "s1"})
+        self.assertEqual(res["chip"], "~290K left")
+        self.assertIn("Below gate", res["panel"])
+        self.assertIn("saved: +$0.05 — that's 42%", res["panel"])
 
 
 class TestWindowCache(StatusBase):

@@ -6,24 +6,19 @@
 
 from __future__ import annotations
 
-import importlib.util
 import sqlite3
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from _bootstrap import load_plugin_root
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 
 
 def load_init():
-    spec = importlib.util.spec_from_file_location("ic_under_test_ms", PLUGIN_DIR / "__init__.py")
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["ic_under_test_ms"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    return load_plugin_root("ic_under_test_ms")
 
 
 EXPECTED_MACHINE = (

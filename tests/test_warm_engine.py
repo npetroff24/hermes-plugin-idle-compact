@@ -2,24 +2,20 @@
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_DIR))
 
-from _bootstrap import AGENT_HOME  # noqa: E402,F401  (кладёт исходники ядра в sys.path)
+from _bootstrap import AGENT_HOME, load_plugin_module  # noqa: E402,F401  (кладёт исходники ядра в sys.path)
 
 
 def _load():
-    spec = importlib.util.spec_from_file_location("we_test", PLUGIN_DIR / "warm_engine.py")
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    return load_plugin_module("warm_engine.py", "we_test")
 
 
 class TestClone(unittest.TestCase):
@@ -153,14 +149,14 @@ class TestMessagesApi(unittest.TestCase):
             calls.update(kw)
             return "warm-summary", {"cache_read": 1, "fresh_input": 2,
                                     "output_tokens": 3}
-        wc.apply_warm = _apply_warm
-        wc.WarmRefused = _WarmRefused
-        pkg.policy = policy
-        pkg.warm_client = wc
+        wc.apply_warm = _apply_warm  # type: ignore[attr-defined]
+        wc.WarmRefused = _WarmRefused  # type: ignore[attr-defined]
+        pkg.policy = policy  # type: ignore[attr-defined]
+        pkg.warm_client = wc  # type: ignore[attr-defined]
         old = {k: sys.modules.get(k) for k in
                ("wepkg_fake", "wepkg_fake.policy", "wepkg_fake.warm_client")}
-        sys.modules["wepkg_fake"] = pkg
-        sys.modules["wepkg_fake.policy"] = policy
+        sys.modules["wepkg_fake"] = pkg  # type: ignore[arg-type]
+        sys.modules["wepkg_fake.policy"] = policy  # type: ignore[arg-type]
         sys.modules["wepkg_fake.warm_client"] = wc
 
         def _restore():
@@ -182,13 +178,8 @@ class TestMessagesApi(unittest.TestCase):
             def update_model(self, *a, **k):
                 pass
 
-        spec = importlib.util.spec_from_file_location(
-            "wepkg_fake.warm_engine", PLUGIN_DIR / "warm_engine.py")
-        assert spec is not None and spec.loader is not None
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["wepkg_fake.warm_engine"] = mod
-        spec.loader.exec_module(mod)
-        mod._import_base = lambda: FakeBase
+        mod = load_plugin_module("warm_engine.py", "wepkg_fake.warm_engine")
+        mod._import_base = lambda: FakeBase  # type: ignore[attr-defined]
         mod.IdleWarmCompressor._cls = None
         engine_cls = mod.IdleWarmCompressor.build()
         return mod, engine_cls, calls
@@ -229,6 +220,108 @@ class TestMessagesApi(unittest.TestCase):
                                    {"role": "user", "content": "u"}], 0.0)
         self.assertEqual(out, "aux-summary")
         self.assertEqual(len(e.aux_messages), 2)
+
+
+class TestFallbackOutsideHandler(unittest.TestCase):
+    """Откат на aux вызывается один раз и вне try/except.
+
+    Раньше `return call_super()` стоял внутри try (ветка протухшего захвата),
+    поэтому ошибка штатного пути попадала в тот же handler: логировалась как
+    отказ warm и повторяла базовый вызов вторым разом.
+    """
+
+    def _load(self, max_age=0):
+        import types as _types
+
+        pkg = _types.ModuleType("wf12")
+        pkg.__path__ = []
+        policy = _types.SimpleNamespace(capture_max_age_for=lambda m: max_age,
+                                        REQUEST_TIMEOUT_S=30)
+        applied = []
+        wc = _types.ModuleType("wf12.warm_client")
+
+        class _Refused(RuntimeError):
+            pass
+
+        def _apply_warm(**kw):
+            applied.append(kw)
+            return "warm-summary", {"cache_read": 1}
+
+        wc.apply_warm = _apply_warm  # type: ignore[attr-defined]
+        wc.WarmRefused = _Refused  # type: ignore[attr-defined]
+        pkg.policy = policy  # type: ignore[attr-defined]
+        pkg.warm_client = wc  # type: ignore[attr-defined]
+        old = {k: sys.modules.get(k) for k in
+               ("wf12", "wf12.policy", "wf12.warm_client", "wf12.warm_engine")}
+        sys.modules["wf12"] = pkg
+        sys.modules["wf12.policy"] = policy  # type: ignore[arg-type]
+        sys.modules["wf12.warm_client"] = wc
+
+        def _restore():
+            for k, v in old.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+        self.addCleanup(_restore)
+
+        mod = load_plugin_module("warm_engine.py", "wf12.warm_engine")
+        return mod, applied
+
+    def _engine(self, stale=True):
+        import types as _types
+
+        return _types.SimpleNamespace(
+            _warm_lock=threading.Lock(),
+            _warm_capture={"messages": [{"role": "user", "content": "hi"}]},
+            _warm_route={
+                "_cap_ts": time.time() - (500 if stale else 0),
+                "model": "m", "api_mode": "chat_completions",
+                "base_url": "https://x/v1", "api_key": "k", "session_id": "s",
+            },
+            _warm_stats=None,
+            api_mode="chat_completions",
+            base_url="https://x/v1",
+            api_key="k",
+            provider="p",
+            _previous_summary=None,
+            _warm_max_tokens=lambda: None,
+        )
+
+    def test_expired_capture_falls_back_once(self):
+        mod, applied = self._load(max_age=1)
+        runs = []
+        out = mod._run_warm(self._engine(), "text", lambda: runs.append(1) or "aux")
+        self.assertEqual(out, "aux")
+        self.assertEqual(runs, [1])
+        self.assertEqual(applied, [], "протухший захват не повторяем")
+
+    def test_fallback_failure_is_not_retried_and_propagates(self):
+        mod, applied = self._load(max_age=1)
+        runs = []
+
+        def call_super():
+            runs.append(1)
+            raise RuntimeError("core down")
+
+        with self.assertRaises(RuntimeError):
+            mod._run_warm(self._engine(), "text", call_super)
+        self.assertEqual(len(runs), 1,
+                         "базовый вызов не повторяем вторым разом")
+        self.assertEqual(applied, [])
+
+    def test_warm_failure_falls_back_once(self):
+        mod, applied = self._load(max_age=1000)
+        engine = self._engine(stale=False)
+        mod._run_warm(engine, "text", lambda: None)  # warm вернёт текст
+
+        applied.clear()
+        runs = []
+        engine2 = self._engine(stale=False)
+        engine2._warm_capture = {}  # пустой захват: warm не применим
+        out = mod._run_warm(engine2, "text", lambda: runs.append(1) or "aux")
+        self.assertEqual(out, "aux")
+        self.assertEqual(runs, [1])
 
 
 if __name__ == "__main__":

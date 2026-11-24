@@ -76,8 +76,16 @@ SCHEDULE_MARGIN_S = 30.0
 
 
 def schedule_delay_for(model: str, evict_ttl: float) -> float:
-    """Пауза планировщика: min(TTL кеша, TTL выселения агента) минус запас."""
-    return float(min(ttl_for_model(model), evict_ttl)) - SCHEDULE_MARGIN_S
+    """Пауза планировщика: min(TTL кеша, TTL выселения агента) минус запас.
+
+    На TTL не длиннее запаса абсолютная вычетка дала бы ноль или минус:
+    дедлайн ушёл бы в прошлое, а сжатие — после смерти кеша. Там берём долю
+    TTL, чтобы интервал остался положительным.
+    """
+    ttl = float(min(ttl_for_model(model), evict_ttl))
+    if ttl <= SCHEDULE_MARGIN_S:
+        return max(ttl * TTL_FACTOR, 0.0)
+    return ttl - SCHEDULE_MARGIN_S
 
 
 def watchdog_grace(delay: float) -> float:

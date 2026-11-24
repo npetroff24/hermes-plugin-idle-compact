@@ -1,5 +1,4 @@
 """Живой замер usage из события post_api + безопасная запись кеша."""
-import importlib.util
 import json
 import sys
 import tempfile
@@ -7,17 +6,13 @@ import time
 import unittest
 from pathlib import Path
 from types import ModuleType
+from _bootstrap import load_plugin_root
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 
 
 def load_init():
-    spec = importlib.util.spec_from_file_location("ic_under_test", PLUGIN_DIR / "__init__.py")
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["ic_under_test"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    return load_plugin_root("ic_under_test")
 
 
 class UsageLiveBase(unittest.TestCase):
@@ -95,6 +90,53 @@ class TestSafeWrite(UsageLiveBase):
         # Файл — валидный JSON после атомарной записи.
         data = json.loads((home / "idle_compact_usage.json").read_text(encoding="utf-8"))
         self.assertEqual(data["s-a"]["tokens"], 1000)
+
+    def test_write_holds_exclusive_lock_over_read_merge_write(self):
+        """Чтение, слияние и os.replace — всё под одним локом (два процесса)."""
+        mod, home = self._mod_with_home()
+        entered = []
+        real_guard = mod._file_guard
+
+        def spy(path):
+            entered.append(path)
+            return real_guard(path)
+
+        mod._file_guard = spy  # type: ignore[attr-defined]
+        mod._note_usage("s-lock", 4242)
+        self.assertEqual(len(entered), 1, "запись обязана идти под локом файла")
+        self.assertEqual(entered[0].name, "idle_compact_usage.json")
+        # Лок — тот же, что у файла дедлайнов: соседний и стабильный по имени.
+        self.assertTrue((home / "idle_compact_usage.lock").exists())
+
+    def test_second_session_does_not_clobber_first(self):
+        """Слияние внутри лока: запись второй сессии не теряет первую."""
+        mod, home = self._mod_with_home()
+        mod._note_usage("s-first", 111)
+        mod._note_usage("s-second", 222)
+        data = json.loads((home / "idle_compact_usage.json").read_text(encoding="utf-8"))
+        self.assertEqual(data["s-first"]["tokens"], 111)
+        self.assertEqual(data["s-second"]["tokens"], 222)
+
+    def test_temp_file_is_unique_and_removed(self):
+        """Общий `<имя>.tmp` заменён на уникальный файл рядом с кешем."""
+        mod, home = self._mod_with_home()
+        seen = []
+        real_mkstemp = mod.tempfile.mkstemp
+
+        def spy(**kw):
+            out = real_mkstemp(**kw)
+            seen.append((out[1], kw.get("dir"), kw.get("prefix")))
+            return out
+
+        mod.tempfile.mkstemp = spy  # type: ignore[attr-defined]
+        mod._note_usage("s-u1", 10)
+        mod._note_usage("s-u2", 20)
+        self.assertEqual(len(seen), 2)
+        self.assertNotEqual(seen[0][0], seen[1][0], "два писателя не делят один tmp")
+        for name, directory, prefix in seen:
+            self.assertEqual(directory, str(home))
+            self.assertEqual(prefix, "idle_compact_usage.json.")
+            self.assertFalse(Path(name).exists(), "временный файл убран после replace")
 
     def test_broken_file_reads_zero(self):
         mod, home = self._mod_with_home()
@@ -175,9 +217,6 @@ class TestExactCoreCount(UsageLiveBase):
         return mod, home
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
 
 class TestToastAndBar(UsageLiveBase):
     def _db_with_session(self, home, session_id="s-t", model="m"):
@@ -248,3 +287,6 @@ class TestToastAndBar(UsageLiveBase):
     def test_bar_none_without_usage(self):
         mod, _ = self._home_full()
         self.assertIsNone(mod._bar_numbers("s-unknown"))
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

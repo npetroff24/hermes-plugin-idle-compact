@@ -126,6 +126,12 @@ def _instruction_row(prompt: str) -> dict:
     return {"role": "user", "content": prompt}
 
 
+# Anthropic требует ``max_tokens`` в теле запроса: без него релей отвечает 400
+# и весь warm-путь падает. Ниже 1500 лимит бессмысленен — reasoning съедает
+# бюджет и текста саммари не остаётся (AGENTS.md, «Транспорты warm-запроса»).
+ANTHROPIC_MIN_MAX_TOKENS = 1500
+
+
 def build_payload(captured: dict, prompt: str, api_mode: str, max_tokens: int | None) -> dict:
     """Собрать warm-запрос: захваченный payload + инструкция в хвосте."""
     body = dict(captured)
@@ -187,10 +193,8 @@ def build_payload(captured: dict, prompt: str, api_mode: str, max_tokens: int | 
         body.pop("stream", None)
     elif api_mode == "anthropic_messages":
         body["messages"] = rows
-        if max_tokens:
-            body["max_tokens"] = int(max_tokens)
-        else:
-            body.pop("max_tokens", None)
+        # Обязательное поле: удалять его нельзя, иначе 400 на всём warm-пути.
+        body["max_tokens"] = int(max_tokens) if max_tokens else ANTHROPIC_MIN_MAX_TOKENS
     else:
         body["messages"] = rows
         if max_tokens:
