@@ -54,7 +54,7 @@ function currentSessionId() {
   try {
     const a = host.state && host.state.activeSessionId
     return (a && typeof a.get === 'function' ? a.get() : null) || null
-  } catch (e) {
+  } catch {
     return null
   }
 }
@@ -63,7 +63,7 @@ function focusedSessionId() {
   try {
     const f = host.state && host.state.focusedSessionId
     return (f && typeof f.get === 'function' ? f.get() : null) || null
-  } catch (e) {
+  } catch {
     return null
   }
 }
@@ -72,7 +72,7 @@ function storedSessionId() {
   try {
     const s = host.state && host.state.focusedStoredSessionId
     return (s && typeof s.get === 'function' ? s.get() : null) || null
-  } catch (e) {
+  } catch {
     return null
   }
 }
@@ -141,7 +141,7 @@ function matchSession(p) {
     return [p.session_id, p.session_key, p.agent_session_id].some(
       (v) => typeof v === 'string' && v && ids.indexOf(v) >= 0
     )
-  } catch (e) {
+  } catch {
     return true
   }
 }
@@ -429,7 +429,7 @@ function Panel({ snap }) {
   })
 }
 
-function Chip({ data }) {
+function Chip({ data, refresh }) {
   const snap = useValue(data) || EMPTY
   const [open, setOpen] = useState(false)
   const pct = savingsPct(snap)
@@ -440,41 +440,12 @@ function Chip({ data }) {
     ? { background: 'var(--chrome-action-hover)', color: 'var(--ui-text-primary)' }
     : null
 
-  // The click is the one moment an exact core count is cheap enough to ask
-  // for; a failure here leaves the pushed numbers on screen.
-  const refresh = () => {
-    if (rpcUnsupported) {
-      return
-    }
-    fetchStatus().then(
-      (fresh) => data.set(fresh),
-      (e) => {
-        if (isUnknownMethod(e)) {
-          rpcUnsupported = true
-          return
-        }
-        if (snap.savings) {
-          return
-        }
-        const detail = (e && (e.message || e.data || e.code)) || e
-        try {
-          host.notify({
-            durationMs: TOAST_MS,
-            kind: 'error',
-            title: 'idle-compact',
-            message: `status unavailable: ${String(detail)}`
-          })
-        } catch (err) {
-          // No notifications in this host — the tooltip still carries the state.
-        }
-      }
-    )
-  }
-
   return jsx(Popover, {
     onOpenChange: (next) => {
       setOpen(next)
-      if (next) {
+      // Refresh lives in register(): it can only decide whether its answer is
+      // still current where the accepted-update generation is visible.
+      if (next && refresh) {
         refresh()
       }
     },
@@ -513,12 +484,64 @@ export default {
   name: 'idle-compact',
   register(ctx) {
     const data = atom(EMPTY)
+    // Generation of the last update accepted into `data`: bumped by every
+    // push, every applied pull and the chat-switch reset. An RPC or pull
+    // answer that started before a newer update is stale even in the same
+    // chat, so it must never replace that newer update.
+    let generation = 0
+    const accept = (snap) => {
+      generation += 1
+      data.set(snap)
+    }
+    const currentSid = () => storedSessionId() || focusedSessionId() || currentSessionId()
+
+    // The click is the one moment an exact core count is cheap enough to ask
+    // for; a failure here leaves the pushed numbers on screen.
+    const refresh = () => {
+      if (rpcUnsupported) {
+        return
+      }
+      // Capture what was on screen before asking: a panel opened in chat A
+      // and a chat switch (or a push) during the request leave A's snapshot
+      // older than the screen, so it is dropped instead of installed.
+      const wantSid = currentSid()
+      const wantGen = generation
+      fetchStatus().then(
+        (fresh) => {
+          if (generation !== wantGen || currentSid() !== wantSid) {
+            return
+          }
+          accept(fresh)
+        },
+        (e) => {
+          if (isUnknownMethod(e)) {
+            rpcUnsupported = true
+            return
+          }
+          const snap = (data.get && data.get()) || EMPTY
+          if (snap.savings) {
+            return
+          }
+          const detail = (e && (e.message || e.data || e.code)) || e
+          try {
+            host.notify({
+              durationMs: TOAST_MS,
+              kind: 'error',
+              title: 'idle-compact',
+              message: `status unavailable: ${String(detail)}`
+            })
+          } catch {
+            // No notifications in this host — the tooltip still carries the state.
+          }
+        }
+      )
+    }
 
     ctx.register({
       area: 'statusBar.right',
       id: 'chip',
       order: 120,
-      render: () => jsx(Chip, { data })
+      render: () => jsx(Chip, { data, refresh })
     })
 
     ctx.onEvent(EVENT_TYPE, (event) => {
@@ -536,27 +559,33 @@ export default {
           return
         }
         lastPushTs = ts
-        data.set(snapshotOf(p))
-      } catch (e) {
+        accept(snapshotOf(p))
+      } catch {
         // A bad frame must never break the chip.
       }
     })
 
     // One best-effort pull for the gateway route; the push covers the rest.
     // A slow or failing backend must never block chip registration.
-    const currentSid = () => storedSessionId() || focusedSessionId() || currentSessionId()
     const pullOnce = () => {
       try {
-        // Ответ, прилетевший после нового переключения, выбрасываем.
+        // Ответ, прилетевший после нового переключения или более свежего
+        // пуша, выбрасываем: он описывает уже снятое со экрана состояние.
         const want = currentSid()
+        const wantGen = generation
         const out = fetchStatus()
         if (out && typeof out.then === 'function') {
           out.then(
-            (fresh) => { if (currentSid() === want) { data.set(fresh) } },
+            (fresh) => {
+              if (generation !== wantGen || currentSid() !== want) {
+                return
+              }
+              accept(fresh)
+            },
             (e) => { if (isUnknownMethod(e)) { rpcUnsupported = true } }
           )
         }
-      } catch (e) {
+      } catch {
         // No RPC here — the push will fill the chip on the next turn.
       }
     }
@@ -567,7 +596,9 @@ export default {
       rpcUnsupported = false
       lastPushTs = 0
       const prev = (data.get && data.get()) || EMPTY
-      data.set({ ...prev, chip: '', panel: '', bar: null, chat: null })
+      // accept(), не data.set(): сброс обязан сдвинуть генерацию, иначе
+      // ответ по покинутому чату примется как свежий.
+      accept({ ...prev, chip: '', panel: '', bar: null, chat: null })
       pullOnce()
     }
     try {
@@ -583,7 +614,7 @@ export default {
       if (wired === 0) {
         throw new Error('no session atoms')
       }
-    } catch (e) {
+    } catch {
       // No session tracking — the push still fills the chip.
     }
   }

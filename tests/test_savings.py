@@ -245,6 +245,31 @@ class TestLifecycle(unittest.TestCase):
         lines = [json.loads(x) for x in self.ledger.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(lines[-1]["after"], 7000)
 
+    def test_after_prefers_prompt_total_over_buckets(self):
+        """prompt_tokens — уже полный итог промпта: бакеты к нему не добавляем."""
+        sid = "sess-p"
+        savings.begin_compaction(sid, "muse-spark-1.3-contributor", 225_000)
+        savings.end_compaction(sid, after_tokens=100_000)
+        pend = savings._state[sid]["pending"]
+        savings.on_post_api_request(
+            session_id=sid, started_at=pend["ts"] + 3600,
+            usage={"prompt_tokens": 5000, "input_tokens": 1000,
+                   "cache_read_tokens": 2000, "cache_write_tokens": 4000})
+        lines = [json.loads(x) for x in self.ledger.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(lines[-1]["after"], 5000)
+
+    def test_after_sums_aliases_when_total_is_absent(self):
+        """Смешанные поля: длинные и короткие имена бакетов в одном usage."""
+        sid = "sess-mixed"
+        savings.begin_compaction(sid, "muse-spark-1.3-contributor", 225_000)
+        savings.end_compaction(sid, after_tokens=100_000)
+        pend = savings._state[sid]["pending"]
+        savings.on_post_api_request(
+            session_id=sid, started_at=pend["ts"] + 3600,
+            usage={"input": 500, "cache_read_tokens": 250, "cache_write": 125})
+        lines = [json.loads(x) for x in self.ledger.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(lines[-1]["after"], 875)
+
     def test_abort_clears_window(self):
         savings.begin_compaction("sess-2", "muse-spark", 200_000)
         savings.abort_compaction("sess-2")

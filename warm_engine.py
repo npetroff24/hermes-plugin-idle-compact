@@ -165,26 +165,26 @@ def _run_warm(_self, extra_source: str, call_super):
                     "idle-warm: захват протух (%.0fс > ttl модели), идём холодным путём",
                     time.time() - cap_ts,
                 )
-                return call_super()
-
-            text, stats = warm_client.apply_warm(
-                captured=capture,
-                prompt=WARM_INSTRUCTION + _extra_context(extra_source, getattr(_self, "_previous_summary", None)),
-                api_mode=route.get("api_mode") or _self.api_mode,
-                base_url=route.get("base_url") or _self.base_url,
-                api_key=route.get("api_key") or _self.api_key,
-                timeout=policy.REQUEST_TIMEOUT_S,
-                max_tokens=_self._warm_max_tokens(),
-                session_id=route.get("session_id"),
-                provider=route.get("provider") or getattr(_self, "provider", ""),
-            )
-            with _self._warm_lock:
-                _self._warm_stats = stats
-            logger.info(
-                "idle-warm: суммаризация по кешу — cache_read=%s свежий_вход=%s выход=%s",
-                stats.get("cache_read"), stats.get("fresh_input"), stats.get("output_tokens"),
-            )
-            return text
+            else:
+                text, stats = warm_client.apply_warm(
+                    captured=capture,
+                    prompt=WARM_INSTRUCTION + _extra_context(
+                        extra_source, getattr(_self, "_previous_summary", None)),
+                    api_mode=route.get("api_mode") or _self.api_mode,
+                    base_url=route.get("base_url") or _self.base_url,
+                    api_key=route.get("api_key") or _self.api_key,
+                    timeout=policy.REQUEST_TIMEOUT_S,
+                    max_tokens=_self._warm_max_tokens(),
+                    session_id=route.get("session_id"),
+                    provider=route.get("provider") or getattr(_self, "provider", ""),
+                )
+                with _self._warm_lock:
+                    _self._warm_stats = stats
+                logger.info(
+                    "idle-warm: суммаризация по кешу — cache_read=%s свежий_вход=%s выход=%s",
+                    stats.get("cache_read"), stats.get("fresh_input"), stats.get("output_tokens"),
+                )
+                return text
         except Exception as exc:
             # Причина отказа видна отдельной строкой: без неё в логе
             # остаётся только «откат на aux», а что именно не так —
@@ -199,6 +199,9 @@ def _run_warm(_self, extra_source: str, call_super):
             bool(capture), bool(route),
         )
 
+    # Откат вызывается ОДИН раз и вне try/except: внутри него ошибка штатного
+    # пути (включая случай протухшего захвата) попадала бы в этот же handler,
+    # логировалась как «warm отказал» и повторяла базовый вызов вторым разом.
     return call_super()
 
 

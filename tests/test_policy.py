@@ -76,6 +76,16 @@ class TestPolicyValues(unittest.TestCase):
         # Короткий TTL: запас 30 с, а не доля (×0.9 от 60 давал бы 6 с рулетки).
         self.assertAlmostEqual(p.schedule_delay_for("claude-sonnet", 60.0), 30.0)
 
+    def test_delay_stays_positive_when_ttl_is_below_margin(self):
+        """TTL не длиннее запаса: вычетка дала бы минус — берём долю TTL."""
+        p = _policy()
+        short = p.schedule_delay_for("claude-sonnet", p.SCHEDULE_MARGIN_S)
+        self.assertGreater(short, 0.0)
+        self.assertAlmostEqual(short, p.SCHEDULE_MARGIN_S * p.TTL_FACTOR)
+        even_shorter = p.schedule_delay_for("claude-sonnet", 5.0)
+        self.assertGreater(even_shorter, 0.0)
+        self.assertAlmostEqual(even_shorter, 5.0 * p.TTL_FACTOR)
+
     def test_watchdog_grace_has_named_floor(self):
         p = _policy()
         self.assertEqual(p.watchdog_grace(10.0), p.WATCHDOG_MIN_GRACE_S)

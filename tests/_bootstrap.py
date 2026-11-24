@@ -29,6 +29,12 @@ def _find_agent_home() -> Path | None:
     if env:
         return Path(env)
     candidates = []
+    # HERMES_HOME: документированный кандидат из докстринга модуля. Без него
+    # на нестандартном доме ядро не находится, и тесты падают, хотя оно есть.
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    if hermes_home:
+        expanded = Path(os.path.expandvars(os.path.expanduser(hermes_home)))
+        candidates.append(expanded / "hermes-agent")
     local = os.environ.get("LOCALAPPDATA", "").strip()
     if local:
         candidates.append(Path(local) / "hermes" / "hermes-agent")

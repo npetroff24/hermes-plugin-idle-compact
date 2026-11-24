@@ -204,10 +204,23 @@ class TestNoOutputCap(unittest.TestCase):
                                 "сожми", "codex_responses", None)
         self.assertNotIn("max_output_tokens", body)
 
-    def test_anthropic_without_cap(self):
+    def test_anthropic_without_cap_keeps_required_budget(self):
+        """Anthropic требует max_tokens: без него релей отвечает 400.
+
+        Раньше поле удалялось (body.pop) и весь warm-путь падал на этом
+        транспорте. Запасной бюджет — не меньше 1500: при меньшем reasoning
+        съедает его целиком и текста саммари не остаётся (AGENTS.md).
+        """
         body = wc.build_payload({"messages": [{"role": "user", "content": "hi"}]},
                                 "сожми", "anthropic_messages", None)
-        self.assertNotIn("max_tokens", body)
+        self.assertEqual(body["max_tokens"], wc.ANTHROPIC_MIN_MAX_TOKENS)
+        self.assertGreaterEqual(body["max_tokens"], 1500)
+
+    def test_anthropic_fallback_replaces_capture_budget(self):
+        """Захваченный max_tokens основного чата не утекает и без бюджета."""
+        body = wc.build_payload({"messages": [{"role": "user", "content": "hi"}],
+                                 "max_tokens": 128}, "сожми", "anthropic_messages", None)
+        self.assertEqual(body["max_tokens"], wc.ANTHROPIC_MIN_MAX_TOKENS)
 
     def test_explicit_cap_from_capture_dropped(self):
         """Захват мог содержать max_tokens основного чата — он не должен утечь."""

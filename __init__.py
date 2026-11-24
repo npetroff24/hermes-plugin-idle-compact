@@ -16,6 +16,7 @@ import logging
 import os
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -330,14 +331,16 @@ def _live_gate(comp=None, session_id: str | None = None, cfg: dict | None = None
             pass
     if cfg is None:
         cfg = _read_config()
+    window = int(getattr(comp, "context_length", 0) or 0)
     frac = _gate_fraction(session_id, cfg)
-    if frac > 0:
-        window = int(getattr(comp, "context_length", 0) or 0)
-        if window > 0:
-            # Порог от ФАКТИЧЕСКОГО окна модели: не зависит от lean/legacy,
-            # threshold и target_ratio — одна понятная величина.
-            return int(frac * window)
-    target = _live_target(cfg=cfg)
+    if frac > 0 and window > 0:
+        # Порог от ФАКТИЧЕСКОГО окна модели: не зависит от lean/legacy,
+        # threshold и target_ratio — одна понятная величина.
+        return int(frac * window)
+    # Без доли и без окна — прежняя формула. Окно передаём тем же источником,
+    # что и _gate_floor: доля в compression.threshold без фактического окна не
+    # считается (AGENTS.md), а явный threshold_tokens остаётся главнее окна.
+    target = _live_target(window_tokens=window or None, cfg=cfg)
     return int(target * GATE_K) if target else None
 
 
@@ -507,16 +510,24 @@ def _core_record(session_id: str) -> tuple[float, int | None] | None:
         return rec
 
 
-def _apply_core_size(session_id: str, size: int) -> int:
+def _apply_core_size(session_id: str, size: int,
+                     measured_at: float | None = None) -> int:
     """Свежий размер из записи ядра вместо протухшей оценки.
 
     ``last_prompt_tokens`` обновляется только на запросах, а ядерное сжатие
     запроса не делает — без этого таймер видел бы старый большой размер.
+
+    Подмена действует, только пока замер СТАРШЕ сжатия (``measured_at``).
+    Замер, сделанный после него, уже описывает сжатый контекст: сессия,
+    выросшая с 50К до 300К после сжатия, не должна читаться как 50К — иначе
+    гейт не срабатывает до конца жизни записи (четыре часа).
     """
     rec = _core_record(session_id)
-    if rec is not None and rec[1] is not None:
-        return min(size, rec[1])
-    return size
+    if rec is None or rec[1] is None:
+        return size
+    if measured_at is not None and measured_at > rec[0]:
+        return size
+    return min(size, rec[1])
 
 # Ожидающие таймеры переживают reload плагина: {session_id: {deadline, stamp, model}}
 _PENDING_FILE = "idle_compact_pending.json"
@@ -527,13 +538,14 @@ def _pending_path() -> Path:
 
 
 @contextlib.contextmanager
-def _pending_guard():
+def _file_guard(path: Path):
     """Эксклюзивный доступ к файлу состояния между процессами.
 
     Без этого 89 загрузок плагина в сутки перетирали чужие записи: каждый
     процесс писал «только то, что восстановил он», и таймеры терялись.
+    Блокировка лежит в файле ``<имя>.lock'' рядом с состоянием: у каждого
+    файла она своя, а имя то же, что у прежней `_pending_guard`.
     """
-    path = _pending_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(".lock")
     fh = None
@@ -545,7 +557,7 @@ def _pending_guard():
 
         _lock_fh(fh)
     except Exception:
-        logger.debug("idle-compact: pending lock unavailable", exc_info=True)
+        logger.debug("idle-compact: state lock unavailable for %s", path, exc_info=True)
     try:
         yield
     finally:
@@ -559,6 +571,13 @@ def _pending_guard():
                 fh.close()
             except Exception:
                 pass
+
+
+@contextlib.contextmanager
+def _pending_guard():
+    """Эксклюзивный доступ к файлу дедлайнов (см. `_file_guard`)."""
+    with _file_guard(_pending_path()):
+        yield
 
 
 def _load_pending() -> dict[str, dict]:
@@ -661,20 +680,34 @@ def _note_usage(session_id: str, tokens: int) -> None:
             if now - pts < 10.0 and abs(tokens - ptok) <= max(1, ptok // 100):
                 return
         path = _usage_path()
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            data = data if isinstance(data, dict) else {}
-        except Exception:
-            data = {}
-        data = {k: v for k, v in data.items()
-                if now - float((v or {}).get("ts") or 0) < 7 * 86400}
-        if (data.get(session_id) or {}).get("tokens") == tokens:
-            _usage_last_write[session_id] = (now, tokens)
-            return
-        data[session_id] = {"tokens": tokens, "ts": now}
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, path)
+        # Вся последовательность чтение → слияние → os.replace под тем же
+        # эксклюзивным локом, что и файл дедлайнов: иначе gateway и serve
+        # читают одно состояние, каждый дописывает своё, и последний
+        # затирает чужую сессию целиком.
+        with _file_guard(path):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                data = data if isinstance(data, dict) else {}
+            except Exception:
+                data = {}
+            data = {k: v for k, v in data.items()
+                    if now - float((v or {}).get("ts") or 0) < 7 * 86400}
+            if (data.get(session_id) or {}).get("tokens") == tokens:
+                _usage_last_write[session_id] = (now, tokens)
+                return
+            data[session_id] = {"tokens": tokens, "ts": now}
+            # Уникальный файл в том же каталоге: общий `<имя>.tmp` два
+            # писателя дописывали в один и тот же буфер.
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps(data, ensure_ascii=False))
+                os.replace(tmp_name, path)
+            except Exception:
+                with contextlib.suppress(Exception):
+                    os.unlink(tmp_name)
+                raise
         _usage_last_write[session_id] = (now, tokens)
     except Exception:
         logger.debug("idle-compact: usage cache write failed", exc_info=True)
@@ -1027,7 +1060,10 @@ def _fire(session_id: str, stamp: float, model: str, ctx=None) -> None:
             floor = gate
         size = exact if exact is not None else _rough_tokens(session_id)
         # Guard: свежий размер из записи ядра вместо протухшей оценки.
-        size = _apply_core_size(session_id, size)
+        # ``last_ts`` — момент последнего хода сессии: он же верхняя граница
+        # времени замера (``last_prompt_tokens`` пишется запросом, оценка
+        # читает БД, которую тот же ход и обновил).
+        size = _apply_core_size(session_id, size, measured_at=last_ts or None)
         idle_min = (time.time() - last_ts) / 60 if last_ts else -1
         if size <= floor:
             logger.info(
@@ -1388,6 +1424,10 @@ def _do_compress(session_id: str, model: str, size: int, ctx, agent=None,
                 kwargs["commit_fence"] = fence
 
             def run() -> None:
+                # Флаг успеха живёт во внешней функции: без nonlocal запись
+                # уходила в локальную переменную run(), а guard выселения в
+                # finally читал всегда False.
+                nonlocal did_compress
                 # Включаем warm-путь: префикс = последний реальный запрос сессии.
                 engine = getattr(agent, "context_compressor", None)
                 warm_on = False

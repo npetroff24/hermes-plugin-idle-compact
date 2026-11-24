@@ -73,6 +73,52 @@ class TestKernelDefaults(unittest.TestCase):
         )
         self.assertEqual(mod._live_target(window_tokens=1_048_576), 50_000)
 
+class TestLiveGateWindow(unittest.TestCase):
+    """Дробный threshold без фактического окна не считается (AGENTS.md)."""
+
+    def _mod_with_config(self, text):
+        mod = load_init()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        (Path(tmp.name) / "config.yaml").write_text(text, encoding="utf-8")
+        mod._home = lambda: Path(tmp.name)  # type: ignore[attr-defined]
+        mod._test_settings = lambda *a, **k: {}  # type: ignore[attr-defined]
+        return mod
+
+    def test_gate_uses_compressor_window_for_fraction_threshold(self):
+        """0.5 x 1 000 000 = 500 000 порог, цель 100 000, гейт 200 000."""
+        mod = self._mod_with_config("""compression:
+  threshold: 0.5
+""")
+
+        class Comp:
+            context_length = 1_000_000
+
+        self.assertEqual(mod._live_gate(Comp()), 200000)
+
+    def test_gate_without_window_still_skips(self):
+        """Окна нет — долю не на что умножать, гейт честно None."""
+        mod = self._mod_with_config("""compression:
+  threshold: 0.5
+""")
+
+        class Comp:
+            pass
+
+        self.assertIsNone(mod._live_gate(Comp()))
+
+    def test_explicit_threshold_tokens_wins_over_window(self):
+        mod = self._mod_with_config("""compression:
+  threshold_tokens: 400000
+  threshold: 0.9
+""")
+
+        class Comp:
+            context_length = 1_000_000
+
+        # Явные токены главнее окна: 400 000 x 0.2 = 80 000, гейт 160 000.
+        self.assertEqual(mod._live_gate(Comp()), 160000)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

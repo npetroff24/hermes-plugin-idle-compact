@@ -363,13 +363,19 @@ def on_post_api_request(**kw) -> None:
     # из-за чего «до» и «после» были несопоставимы.
     try:
         usage = kw.get("usage") or {}
-        real_after = int(usage.get("input_tokens") or 0) + int(
-            usage.get("cache_read_tokens") or usage.get("cache_read") or 0
-        ) + int(
-            usage.get("cache_write_tokens") or usage.get("cache_write") or 0
-        )
+        # Та же старшинство, что у _payload_prompt_tokens: готовое
+        # prompt_tokens — уже полный итог промпта (кеш внутри), и добавлять к
+        # нему бакеты нельзя — двойной счёт. Суммируем три бакета только
+        # когда готового итога нет.
+        real_after = int(usage.get("prompt_tokens") or 0)
         if real_after <= 0:
-            real_after = int(usage.get("prompt_tokens") or usage.get("input") or 0)
+            real_after = int(
+                usage.get("input_tokens") or usage.get("input") or 0
+            ) + int(
+                usage.get("cache_read_tokens") or usage.get("cache_read") or 0
+            ) + int(
+                usage.get("cache_write_tokens") or usage.get("cache_write") or 0
+            )
         if real_after > 0:
             pend["after"] = real_after
     except Exception:
