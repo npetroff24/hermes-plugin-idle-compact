@@ -52,8 +52,8 @@ reasoning are unaffected.
 
    The timer moves to ~76 min on its own, no code changes needed.
 2. On fire: session still quiet, source not machine, size above gate.
-   The gate is your saved threshold (a share of the model window),
-   or the core compression target × 2 when nothing is saved.
+   The gate is your saved ratio (a share of the core compression threshold),
+   or half the core threshold when nothing is saved.
 3. The plugin grabs the last real request (`pre_api_request` hook) and enables
    the warm path on its own context engine.
 4. The core does the compaction (its own `_compress_context`): locks,
@@ -86,21 +86,21 @@ hermes plugins install https://github.com/npetroff24/hermes-plugin-idle-compact 
 hermes config set context.engine idle_warm
 ```
 
-By default, auto-compression kicks in once the context passes the
-core compression target × 2.
+By default, auto-compression kicks in once the context passes
+half the core compression threshold.
 
 How it works: every message starts a timer — the model
 cache TTL minus 30 seconds. A new message resets the countdown. Idle through the
 whole timer with the context above the gate — compaction runs in
 the background. You come back to an already-slim chat.
 
-Optional: your own threshold as a share of the model window —
-0.2 means "compact past 20% of the window". Lower = earlier and
-more often. A set number (above zero) replaces target × 2.
+Optional: your own gate as a share of the core compression threshold —
+0.6 means "compact past 60% of the threshold". Lower = earlier and
+more often.
 Set it in the Plugins hub (→ Save), or with one command:
 
 ```bash
-hermes config set plugins.idle_compact.gate_fraction 0.2
+hermes config set plugins.idle_compact.idle_gate_ratio 0.6
 ```
 
 Works on Windows and Linux.
@@ -211,8 +211,8 @@ tools и reasoning не ломаются.
 
    Таймер сам переедет на ~76 минут, код трогать не надо.
 2. Сработал: сессия тиха, источник не машинный, размер > гейта.
-   Гейт — сохранённый порог (доля окна модели) либо цель
-   сжатия ядра × 2, если ничего не сохранено.
+   Гейт — сохранённая доля порога сжатия ядра либо половина
+   этого порога, если ничего не сохранено.
 3. Плагин захватывает последний реальный запрос (хук `pre_api_request`) и
    включает warm-путь на своём контекст-движке.
 4. Сжатие делает ядро (свой `_compress_context`): локи, cooldown,
@@ -246,19 +246,18 @@ hermes config set context.engine idle_warm
 ```
 
 По умолчанию автокомпрессия активируется когда контекст переваливает
-за цель сжатия ядра × 2.
+за половину порога сжатия ядра.
 
 Как это работает: после каждого сообщения — таймер: время жизни
 кеша минус 30 секунд. Новое сообщение сбрасывает отсчёт. Досидели в тишине, контекст
 больше гейта — сжатие в фоне. Вернулся — чат уже ужатый.
 
-Опционально: свой порог как доля окна модели — 0.2 означает
-«жать после 20% окна». Меньше число — раньше и чаще. Указанное
-число (больше нуля) отключает цель × 2 — дальше работает оно.
+Опционально: свой гейт как доля порога сжатия ядра — 0.6 означает
+«жать после 60% порога». Меньше число — раньше и чаще.
 Задаётся в хабе плагинов (→ Сохранить) либо одной командой:
 
 ```bash
-hermes config set plugins.idle_compact.gate_fraction 0.2
+hermes config set plugins.idle_compact.idle_gate_ratio 0.6
 ```
 
 Работает на Windows и Linux.

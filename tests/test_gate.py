@@ -33,19 +33,19 @@ class TestHubPrecedence(unittest.TestCase):
             "  entries:\n"
             "    idle-compact:\n"
             "      settings:\n"
-            "        auto_compact_ratio: 0.3\n"
+            "        idle_gate_ratio: 0.3\n"
             "  idle_compact:\n"
-            "    gate_fraction: 0.1\n"
+            "    idle_gate_ratio: 0.1\n"
         )
-        self.assertAlmostEqual(mod._gate_fraction(), 0.3)
+        self.assertEqual(mod._gate_ratio(), (0.3, "threshold"))
 
     def test_manual_when_no_hub(self):
-        mod = self._mod_with_config("plugins:\n  idle_compact:\n    gate_fraction: 0.1\n")
-        self.assertAlmostEqual(mod._gate_fraction(), 0.1)
+        mod = self._mod_with_config("plugins:\n  idle_compact:\n    idle_gate_ratio: 0.1\n")
+        self.assertEqual(mod._gate_ratio(), (0.1, "threshold"))
 
-    def test_zero_when_nothing(self):
+    def test_default_when_nothing(self):
         mod = self._mod_with_config("other: 1\n")
-        self.assertAlmostEqual(mod._gate_fraction(), 0.0)
+        self.assertEqual(mod._gate_ratio(), (0.5, "threshold"))
 
 
 class TestKernelDefaults(unittest.TestCase):
@@ -72,6 +72,48 @@ class TestKernelDefaults(unittest.TestCase):
             "compression:\n  threshold_tokens: 500000\n  target_ratio: 0.1\n"
         )
         self.assertEqual(mod._live_target(window_tokens=1_048_576), 50_000)
+
+
+class TestGateFromThreshold(unittest.TestCase):
+    def _mod_with_config(self, text):
+        mod = load_init()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        (Path(tmp.name) / "config.yaml").write_text(text, encoding="utf-8")
+        mod._home = lambda: Path(tmp.name)  # type: ignore[attr-defined]
+        mod._test_settings = lambda *a, **k: {}  # type: ignore[attr-defined]
+        return mod
+
+    def test_default_gate_half_threshold(self):
+        """Без настроек: 0.5 × порог ядра (окно 1М → 250К)."""
+        import types
+
+        mod = self._mod_with_config("other: 1\n")
+        comp = types.SimpleNamespace(context_length=1000000)
+        self.assertEqual(mod._live_gate(comp), 250000)
+
+    def test_explicit_ratio(self):
+        import types
+
+        mod = self._mod_with_config(
+            "plugins:\n  idle_compact:\n    idle_gate_ratio: 0.6\n"
+        )
+        comp = types.SimpleNamespace(context_length=1000000)
+        self.assertEqual(mod._live_gate(comp), 300000)
+
+    def test_hub_is_threshold_based(self):
+        """Хаб — доля порога: 0.3 × 500К = 150К."""
+        import types
+
+        mod = self._mod_with_config(
+            "plugins:\n"
+            "  entries:\n"
+            "    idle-compact:\n"
+            "      settings:\n"
+            "        idle_gate_ratio: 0.3\n"
+        )
+        comp = types.SimpleNamespace(context_length=1000000)
+        self.assertEqual(mod._live_gate(comp), 150000)
 
 
 if __name__ == "__main__":

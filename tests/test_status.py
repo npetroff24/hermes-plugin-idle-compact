@@ -143,7 +143,7 @@ class TestPanelMoney(StatusBase):
 class TestPanelContext(StatusBase):
     def _home_with_all(self, tokens=10000):
         mod, home = self._mod_with_home(
-            "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n"
+            "plugins:\n  idle_compact:\n    idle_gate_ratio: 0.6\n"
         )
         self._db_with_session(home)
         (home / "idle_compact_windows.json").write_text(
@@ -235,7 +235,7 @@ class TestPanelReadOnly(StatusBase):
 class TestRpcStatus(StatusBase):
     def test_rpc_returns_chip_and_panel(self):
         mod, home = self._mod_with_home(
-            "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n"
+            "plugins:\n  idle_compact:\n    idle_gate_ratio: 0.6\n"
         )
         self._db_with_session(home, chars=40000)
         (home / "idle_compact_windows.json").write_text(
@@ -255,7 +255,7 @@ class TestRpcStatus(StatusBase):
 
     def test_rpc_ready_over_gate(self):
         mod, home = self._mod_with_home(
-            "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n"
+            "plugins:\n  idle_compact:\n    idle_gate_ratio: 0.6\n"
         )
         self._db_with_session(home)
         (home / "idle_compact_windows.json").write_text(
@@ -270,7 +270,7 @@ class TestRpcStatus(StatusBase):
         import sys
         import types
         mod, home = self._mod_with_home(
-            "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n"
+            "plugins:\n  idle_compact:\n    idle_gate_ratio: 0.6\n"
         )
         self._db_with_session(home)
         (home / "idle_compact_windows.json").write_text(
@@ -353,7 +353,7 @@ class TestRpcStatus(StatusBase):
         import sys
         import types
         mod, home = self._mod_with_home(
-            "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n"
+            "plugins:\n  idle_compact:\n    idle_gate_ratio: 0.6\n"
         )
         self._db_with_session(home)
         seen = {}
@@ -434,7 +434,7 @@ class TestSingleParse(StatusBase):
         mod, _home = self._mod_with_home()
         mod._read_config = mock.Mock(side_effect=AssertionError("disk read"))  # type: ignore[attr-defined]
         cfg = {"compression": {"threshold_tokens": 100000, "target_ratio": 0.5}}
-        self.assertEqual(mod._live_gate(cfg=cfg), 100000)
+        self.assertEqual(mod._live_gate(cfg=cfg), 50000)
         self.assertAlmostEqual(mod._evict_ttl(cfg), mod.policy.AGENT_CACHE_IDLE_TTL_DEFAULT_S)
 
 

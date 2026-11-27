@@ -155,7 +155,7 @@ class TestExactCoreCount(UsageLiveBase):
     def _with_home_and_cache(self):
         mod, home = self._mod_with_home()
         (home / "config.yaml").write_text(
-            "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n", encoding="utf-8")
+            "plugins:\n  idle_compact:\n    idle_gate_ratio: 0.6\n", encoding="utf-8")
         import sqlite3
 
         con = sqlite3.connect(str(home / "state.db"))
@@ -196,7 +196,7 @@ class TestToastAndBar(UsageLiveBase):
     def _home_full(self, tokens=10000):
         mod, home = self._mod_with_home()
         (home / "config.yaml").write_text(
-            "plugins:\n  idle_compact:\n    gate_fraction: 0.3\n", encoding="utf-8")
+            "plugins:\n  idle_compact:\n    idle_gate_ratio: 0.6\n", encoding="utf-8")
         self._db_with_session(home)
         (home / "idle_compact_windows.json").write_text(
             json.dumps({"m": 1000000}), encoding="utf-8")

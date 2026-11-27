@@ -274,7 +274,7 @@ def _plugin_cfg(cfg: dict | None = None) -> dict:
 
 
 def _hub_auto_ratio(cfg: dict | None = None) -> float:
-    """Порог автосжатия из хаба настроек (`plugins.entries.*.settings`)."""
+    """Гейт из хаба настроек (`plugins.entries.*.settings`). Доля порога ядра."""
     try:
         if cfg is None:
             cfg = _read_config()
@@ -291,7 +291,7 @@ def _hub_auto_ratio(cfg: dict | None = None) -> float:
             settings = entry.get("settings")
             if not isinstance(settings, dict):
                 continue
-            val = settings.get("auto_compact_ratio")
+            val = settings.get("idle_gate_ratio")
             if val is not None and float(val) > 0:
                 return float(val)
     except Exception:
@@ -299,26 +299,30 @@ def _hub_auto_ratio(cfg: dict | None = None) -> float:
     return 0.0
 
 
-def _gate_fraction(session_id: str | None = None, cfg: dict | None = None) -> float:
-    """Доля окна модели, после которой включается фоновое сжатие.
+DEFAULT_GATE_RATIO = 0.5  # дефолт: половина порога сжатия ядра
 
-    Порядок: хаб настроек → ``<HERMES_HOME>/idle_compact_test.json`` (поле
-    ``gate_fraction``) → ``plugins.idle_compact.gate_fraction`` в config.yaml.
-    Ноль/нет — работает прежняя формула 2 × цель.
+
+def _gate_ratio(session_id: str | None = None, cfg: dict | None = None) -> tuple[float, str]:
+    """Доля гейта автосжатия в простое + её база.
+
+    Порядок: хаб настроек (``idle_gate_ratio`` — доля ПОРОГА ядра) →
+    ``<HERMES_HOME>/idle_compact_test.json`` (поле ``idle_gate_ratio``) →
+    ``plugins.idle_compact.idle_gate_ratio`` в config.yaml → дефолт 0.5
+    от ПОРОГА ядра. Возвращает (доля, база), база всегда "threshold".
     """
     if cfg is None:
         cfg = _read_config()
     hub = _hub_auto_ratio(cfg)
     if hub > 0:
-        return hub
+        return hub, "threshold"
     test = _test_settings(session_id)
-    for src in (test.get("gate_fraction"), _plugin_cfg(cfg).get("gate_fraction")):
+    for src in (test.get("idle_gate_ratio"), _plugin_cfg(cfg).get("idle_gate_ratio")):
         try:
             if src is not None and float(src) > 0:
-                return float(src)
+                return float(src), "threshold"
         except Exception:
             continue
-    return 0.0
+    return DEFAULT_GATE_RATIO, "threshold"
 
 
 def _live_gate(comp=None, session_id: str | None = None, cfg: dict | None = None) -> int | None:
@@ -330,13 +334,13 @@ def _live_gate(comp=None, session_id: str | None = None, cfg: dict | None = None
             pass
     if cfg is None:
         cfg = _read_config()
-    frac = _gate_fraction(session_id, cfg)
-    if frac > 0:
-        window = int(getattr(comp, "context_length", 0) or 0)
-        if window > 0:
-            # Порог от ФАКТИЧЕСКОГО окна модели: не зависит от lean/legacy,
-            # threshold и target_ratio — одна понятная величина.
-            return int(frac * window)
+    window = int(getattr(comp, "context_length", 0) or 0)
+    ratio, _base = _gate_ratio(session_id, cfg)
+    # Доля порога сжатия ядра: следует за настройкой пользователя,
+    # как половинный гейт простоя в самом ядре.
+    thr = _live_threshold(window or None, cfg)
+    if thr:
+        return int(ratio * thr)
     target = _live_target(cfg=cfg)
     return int(target * GATE_K) if target else None
 
@@ -1260,11 +1264,14 @@ def _gate_floor(compressor, session_id: str | None = None) -> int | None:
     except Exception:
         target = None
     _gcfg = _read_config()  # один парс — дальше только проброс
-    frac = _gate_fraction(session_id, _gcfg)
+    ratio, _base = _gate_ratio(session_id, _gcfg)
     window_now = int(getattr(compressor, "context_length", 0) or 0)
-    if frac > 0 and window_now > 0:
-        # Порог от окна модели — приоритетнее цели и режима.
-        return int(frac * window_now)
+    thr_now = int(getattr(compressor, "threshold_tokens", 0) or 0)
+    if not thr_now:
+        thr_now = _live_threshold(window_now or None, _gcfg) or 0
+    if thr_now > 0:
+        # Доля живого порога компрессора — приоритетнее цели и режима.
+        return int(ratio * thr_now)
     if target is None:
         # Фактическое окно модели из живого компрессора — не выдуманное.
         window = int(getattr(compressor, "context_length", 0) or 0)
@@ -2126,9 +2133,9 @@ def _cmd_debug(session_id: str | None = None) -> str:
     lines.append(f"warm compaction: {engine} · process timers: {timers} (pid {os.getpid()})")
     try:
         cfg = _read_config()
-        frac = _gate_fraction(session_id, cfg)
+        ratio, base = _gate_ratio(session_id, cfg)
     except Exception:
-        frac, cfg = 0.0, None
+        ratio, base, cfg = DEFAULT_GATE_RATIO, "threshold", None
     model, window = "", 0
     if session_id:
         try:
@@ -2140,7 +2147,7 @@ def _cmd_debug(session_id: str | None = None) -> str:
             window = _cached_window(model)
     _size, gate = _panel_context(session_id)
     lines.append(
-        f"gate: share {frac:g} · window {model or '?'}={window or '?'} (cache) · "
+        f"gate: share {ratio:g} × {base} · window {model or '?'}={window or '?'} (cache) · "
         f"tokens {gate if gate else '?'}"
     )
     stats = _ledger_stats()
